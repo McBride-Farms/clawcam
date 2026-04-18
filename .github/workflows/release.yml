@@ -12,39 +12,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
+  build-native:
+    name: Build ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Host platforms (where the CLI runs)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: clawcam-linux-amd64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: clawcam-linux-arm64
-            cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: clawcam-darwin-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: clawcam-darwin-arm64
-
-          # Device platforms (what gets deployed to Pi)
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: clawcam-pi-arm64
-            cross: true
-            device: true
-          - target: armv7-unknown-linux-gnueabihf
-            os: ubuntu-latest
-            artifact: clawcam-pi-armv7
-            cross: true
-            device: true
 
     steps:
       - uses: actions/checkout@v4
@@ -62,36 +45,57 @@ jobs:
             libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             pkg-config
 
-      - name: Install cross-compilation dependencies
-        if: matrix.cross
-        run: |
-          sudo apt-get install -y -qq \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
-            libc6-dev-arm64-cross libc6-dev-armhf-cross
-
-          # Set up pkg-config for cross-compilation
-          sudo dpkg --add-architecture arm64 2>/dev/null || true
-          sudo dpkg --add-architecture armhf 2>/dev/null || true
-
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install gstreamer pkg-config
 
-      - name: Configure cross-compilation
-        if: matrix.cross
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml <<'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-
-          [target.armv7-unknown-linux-gnueabihf]
-          linker = "arm-linux-gnueabihf-gcc"
-          EOF
-
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          cp target/${{ matrix.target }}/release/clawcam ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+          tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+          sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256 2>/dev/null || \
+            shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
+
+  build-cross:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            artifact: clawcam-linux-arm64
+          - target: aarch64-unknown-linux-gnu
+            artifact: clawcam-pi-arm64
+          - target: armv7-unknown-linux-gnueabihf
+            artifact: clawcam-pi-armv7
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build with cross
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
@@ -112,10 +116,15 @@ jobs:
     name: Package YOLO model
     runs-on: ubuntu-latest
     steps:
-      - name: Download YOLOv8n ONNX
+      - name: Export YOLOv8n to ONNX
         run: |
-          wget -q -O yolov8n.onnx \
-            https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.onnx
+          pip install ultralytics onnx --quiet
+          python3 -c "
+          from ultralytics import YOLO
+          model = YOLO('yolov8n.pt')
+          model.export(format='onnx', imgsz=640, opset=17, simplify=True)
+          "
+          test -f yolov8n.onnx || exit 1
           sha256sum yolov8n.onnx > yolov8n.onnx.sha256
 
       - name: Upload model artifact
@@ -128,7 +137,7 @@ jobs:
 
   release:
     name: Create release
-    needs: [build, model]
+    needs: [build-native, build-cross, model]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -153,6 +162,10 @@ jobs:
           body: |
             ## Install
 
+            **🤖 Send to your AI agent:**
+            > Read https://raw.githubusercontent.com/grunt3714-lgtm/clawcam/master/SKILL.md and install the clawcam skill. Run: `curl -fsSL https://raw.githubusercontent.com/grunt3714-lgtm/clawcam/master/skill-install.sh | bash`
+
+            **👤 Manual install:**
             ```sh
             curl -fsSL https://raw.githubusercontent.com/grunt3714-lgtm/clawcam/master/install.sh | bash
             ```
@@ -169,4 +182,4 @@ jobs:
             | `clawcam-darwin-arm64` | Host CLI — macOS Apple Silicon |
             | `clawcam-pi-arm64` | Device binary — Raspberry Pi 4/5 (64-bit) |
             | `clawcam-pi-armv7` | Device binary — Raspberry Pi 3/Zero 2 (32-bit) |
-            | `yolov8n.onnx` | YOLOv8n detection model |
+            | `yolov8n.onnx` | YOLOv8n detection model (COCO 80-class) |
