@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use tracing::info;
 
 use crate::device::Device;
@@ -7,6 +8,7 @@ use crate::ssh::session;
 const REMOTE_BIN: &str = "/usr/local/bin/clawcam";
 const REMOTE_MODEL: &str = "/usr/local/share/clawcam/yolov8n.onnx";
 const SERVICE_NAME: &str = "clawcam";
+const GITHUB_REPO: &str = "grunt3714-lgtm/clawcam";
 
 pub async fn run_setup(
     dev: &Device,
@@ -16,36 +18,54 @@ pub async fn run_setup(
 ) -> Result<()> {
     info!("setting up {} ({})", dev.name, dev.host);
 
-    // 1. Install system dependencies
+    // 1. Install system dependencies (runtime only — no -dev packages needed on device)
     info!("installing system dependencies...");
-    session::run_cmd(dev, &format!(
-        "sudo apt-get update -qq && sudo apt-get install -y -qq \
+    session::run_cmd(dev, "\
+        sudo apt-get update -qq && sudo apt-get install -y -qq \
          gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
          gstreamer1.0-plugins-bad gstreamer1.0-libav \
-         libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-         v4l-utils libv4l-dev"
-    )).await.context("failed to install dependencies")?;
+         v4l-utils libv4l-0"
+    ).await.context("failed to install dependencies")?;
 
     // 2. Detect camera source
     info!("detecting camera...");
     let cam_source = detect_camera_source(dev).await?;
     info!("detected camera source: {cam_source}");
 
-    // 3. Upload clawcam binary
+    // 3. Deploy clawcam binary
     info!("deploying clawcam binary...");
     let arch = session::run_cmd(dev, "uname -m").await?;
     let arch = arch.trim();
-    let local_bin = find_binary(arch)?;
     session::run_cmd(dev, "sudo mkdir -p /usr/local/share/clawcam").await?;
-    session::scp_to(dev, &local_bin, "/tmp/clawcam").await?;
+
+    let local_bin = find_binary(arch);
+    match local_bin {
+        Ok(path) => {
+            info!("uploading local binary from {path}");
+            session::scp_to(dev, &path, "/tmp/clawcam").await?;
+        }
+        Err(_) => {
+            info!("no local binary found, downloading from GitHub release...");
+            download_binary_to_device(dev, arch).await?;
+        }
+    }
     session::run_cmd(dev, &format!(
         "sudo mv /tmp/clawcam {REMOTE_BIN} && sudo chmod +x {REMOTE_BIN}"
     )).await?;
 
-    // 4. Upload YOLO model
+    // 4. Deploy YOLO model
     info!("deploying YOLO model...");
-    session::scp_to(dev, "models/yolov8n.onnx", "/tmp/yolov8n.onnx").await
-        .context("failed to upload model — ensure models/yolov8n.onnx exists")?;
+    let local_model = find_model();
+    match local_model {
+        Some(path) => {
+            info!("uploading local model from {}", path.display());
+            session::scp_to(dev, &path.to_string_lossy(), "/tmp/yolov8n.onnx").await?;
+        }
+        None => {
+            info!("no local model found, downloading from GitHub release...");
+            download_model_to_device(dev).await?;
+        }
+    }
     session::run_cmd(dev, &format!(
         "sudo mv /tmp/yolov8n.onnx {REMOTE_MODEL}"
     )).await?;
@@ -109,7 +129,6 @@ WantedBy=multi-user.target
 }
 
 /// Detect what camera is available on the Pi.
-/// Returns a GStreamer source element string.
 async fn detect_camera_source(dev: &Device) -> Result<String> {
     // Check for libcamera (Pi Camera Module)
     let libcam = session::run_cmd(dev, "which libcamera-hello 2>/dev/null && libcamera-hello --list-cameras 2>&1 | head -5").await;
@@ -131,20 +150,109 @@ async fn detect_camera_source(dev: &Device) -> Result<String> {
     anyhow::bail!("no camera detected on device — connect a Pi Camera Module or USB camera")
 }
 
-/// Find the cross-compiled binary for the target architecture.
+/// Find a local cross-compiled binary for the target architecture.
 fn find_binary(arch: &str) -> Result<String> {
+    let artifact = match arch {
+        "aarch64" => "clawcam-pi-arm64",
+        "armv7l" | "armv6l" => "clawcam-pi-armv7",
+        "x86_64" => "clawcam-linux-amd64",
+        _ => anyhow::bail!("unsupported architecture: {arch}"),
+    };
+
     let target = match arch {
         "aarch64" => "aarch64-unknown-linux-gnu",
         "armv7l" | "armv6l" => "armv7-unknown-linux-gnueabihf",
         "x86_64" => "x86_64-unknown-linux-gnu",
+        _ => unreachable!(),
+    };
+
+    // Check multiple locations for the binary
+    let candidates = [
+        format!("target/{target}/release/clawcam"),
+        artifact.to_string(),
+        format!("/tmp/{artifact}"),
+    ];
+
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return Ok(path.clone());
+        }
+    }
+
+    anyhow::bail!("no local binary found for {arch}")
+}
+
+/// Download the binary directly to the device from GitHub releases.
+async fn download_binary_to_device(dev: &Device, arch: &str) -> Result<()> {
+    let artifact = match arch {
+        "aarch64" => "clawcam-pi-arm64",
+        "armv7l" | "armv6l" => "clawcam-pi-armv7",
+        "x86_64" => "clawcam-linux-amd64",
         _ => anyhow::bail!("unsupported architecture: {arch}"),
     };
-    let path = format!("target/{target}/release/clawcam");
-    if !std::path::Path::new(&path).exists() {
-        anyhow::bail!(
-            "binary not found at {path} — cross-compile first:\n  \
-             cargo build --release --target {target}"
-        );
-    }
-    Ok(path)
+
+    let url = get_release_asset_url(artifact).await?;
+
+    session::run_cmd(dev, &format!(
+        "curl -fsSL '{url}' | tar xz -C /tmp && mv /tmp/{artifact} /tmp/clawcam"
+    )).await.context(format!("failed to download {artifact} from GitHub release"))?;
+
+    Ok(())
+}
+
+/// Download the YOLO model directly to the device from GitHub releases.
+async fn download_model_to_device(dev: &Device) -> Result<()> {
+    let url = get_release_asset_url("yolov8n.onnx").await?;
+
+    session::run_cmd(dev, &format!(
+        "curl -fsSL '{url}' -o /tmp/yolov8n.onnx"
+    )).await.context("failed to download YOLO model from GitHub release")?;
+
+    Ok(())
+}
+
+/// Get the download URL for a release asset from the latest GitHub release.
+async fn get_release_asset_url(asset_name: &str) -> Result<String> {
+    let api_url = format!(
+        "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    );
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .get(&api_url)
+        .header("User-Agent", "clawcam")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let tag = resp["tag_name"]
+        .as_str()
+        .context("could not find latest release")?;
+
+    // Direct download URL pattern for GitHub releases
+    let url = format!(
+        "https://github.com/{GITHUB_REPO}/releases/download/{tag}/{asset_name}"
+    );
+
+    info!("release asset: {url}");
+    Ok(url)
+}
+
+/// Find the YOLO model locally — check multiple locations.
+fn find_model() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from("models/yolov8n.onnx"),
+        dirs::config_dir()
+            .map(|d| d.join("openclaw/skills/clawcam/models/yolov8n.onnx"))
+            .unwrap_or_default(),
+        dirs::config_dir()
+            .map(|d| d.join("clawcam/models/yolov8n.onnx"))
+            .unwrap_or_default(),
+        dirs::data_dir()
+            .map(|d| d.join("clawcam/yolov8n.onnx"))
+            .unwrap_or_default(),
+    ];
+
+    candidates.iter().find(|p| p.exists()).cloned()
 }
