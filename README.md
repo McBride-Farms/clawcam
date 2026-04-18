@@ -5,8 +5,11 @@
 
 **AI-powered camera monitoring for Raspberry Pi**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](Cargo.toml)
+[![Release](https://img.shields.io/github/v/release/grunt3714-lgtm/clawcam?color=%23e94560&style=flat-square)](https://github.com/grunt3714-lgtm/clawcam/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2024_edition-orange?style=flat-square)](Cargo.toml)
+[![Platform](https://img.shields.io/badge/platform-Raspberry_Pi-c51a4a?style=flat-square&logo=raspberrypi&logoColor=white)](https://www.raspberrypi.com/)
+[![YOLO](https://img.shields.io/badge/model-YOLOv8n-blueviolet?style=flat-square)](https://github.com/ultralytics/ultralytics)
 
 *Any camera. On-device YOLO. 1080p snapshots. Structured predictions. No cloud.*
 
