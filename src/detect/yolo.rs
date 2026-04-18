@@ -6,7 +6,7 @@ use ort::value::Tensor;
 use crate::webhook::Detection;
 
 const INPUT_SIZE: u32 = 640;
-const CONF_THRESHOLD: f32 = 0.4;
+const DEFAULT_CONF_THRESHOLD: f32 = 0.6;
 const IOU_THRESHOLD: f32 = 0.45;
 
 // COCO class names
@@ -27,10 +27,17 @@ const CLASS_NAMES: &[&str] = &[
 
 pub struct YoloDetector {
     session: Session,
+    conf_threshold: f32,
 }
 
 impl YoloDetector {
     pub fn load(model_path: &str) -> Result<Self> {
+        let conf_threshold = std::env::var("CLAWCAM_CONF_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(DEFAULT_CONF_THRESHOLD)
+            .clamp(0.1, 1.0);
+
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?
             .with_intra_threads(4)
@@ -38,7 +45,8 @@ impl YoloDetector {
             .commit_from_file(model_path)
             .map_err(|e| anyhow::anyhow!("failed to load model from {model_path}: {e}"))?;
 
-        Ok(Self { session })
+        tracing::info!("confidence threshold: {conf_threshold}");
+        Ok(Self { session, conf_threshold })
     }
 
     /// Run inference on an RGB frame. Returns detections scaled to original image dimensions.
@@ -72,7 +80,7 @@ impl YoloDetector {
         let output_2d = ArrayView2::from_shape((rows, cols), slice)
             .context("shape mismatch on output tensor")?;
 
-        let detections = postprocess(output_2d, img_width, img_height);
+        let detections = postprocess(output_2d, img_width, img_height, self.conf_threshold);
         Ok(detections)
     }
 }
@@ -108,6 +116,7 @@ fn postprocess(
     output: ArrayView2<f32>,
     img_width: u32,
     img_height: u32,
+    conf_threshold: f32,
 ) -> Vec<Detection> {
     // YOLOv8 output: [84, 8400] — transpose to [8400, 84]
     let output = output.t();
@@ -132,7 +141,7 @@ fn postprocess(
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .unwrap();
 
-        if score < CONF_THRESHOLD {
+        if score < conf_threshold {
             continue;
         }
 
