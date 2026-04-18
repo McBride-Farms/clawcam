@@ -113,9 +113,9 @@ pub enum Command {
 
     /// Run the on-device detection monitor (not for direct use)
     Monitor {
-        /// Webhook URL
+        /// Webhook URL (or set CLAWCAM_WEBHOOK env var)
         #[arg(long)]
-        webhook: String,
+        webhook: Option<String>,
         /// Bearer token for webhook auth
         #[arg(long)]
         webhook_token: Option<String>,
@@ -197,7 +197,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             crate::media::clip::run_clip_local(dur, &out)
         }
         Command::Monitor { webhook, webhook_token, host, log_path } => {
-            crate::detect::monitor::run_monitor(&webhook, webhook_token.as_deref(), host.as_deref(), log_path.as_deref()).await
+            crate::detect::monitor::run_monitor(webhook.as_deref(), webhook_token.as_deref(), host.as_deref(), log_path.as_deref()).await
         }
     }
 }

@@ -11,6 +11,7 @@ pub async fn run_teardown(dev: &Device) -> Result<()> {
         sudo systemctl stop clawcam 2>/dev/null; \
         sudo systemctl disable clawcam 2>/dev/null; \
         sudo rm -f /etc/systemd/system/clawcam.service; \
+        sudo rm -f /etc/clawcam.env; \
         sudo systemctl daemon-reload; \
         sudo rm -f /usr/local/bin/clawcam; \
         sudo rm -rf /usr/local/share/clawcam"

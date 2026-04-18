@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use gstreamer::prelude::*;
+use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -12,7 +13,7 @@ const INFERENCE_INTERVAL: Duration = Duration::from_millis(500);
 const MOTION_COOLDOWN: Duration = Duration::from_secs(3);
 
 pub async fn run_monitor(
-    webhook_url: &str,
+    webhook_url: Option<&str>,
     webhook_token: Option<&str>,
     host: Option<&str>,
     log_path: Option<&str>,
@@ -30,6 +31,21 @@ pub async fn run_monitor(
             .try_init();
     }
 
+    // Resolve webhook URL: CLI arg takes precedence, then env var from EnvironmentFile
+    let webhook_url_owned = match webhook_url {
+        Some(u) => u.to_string(),
+        None => std::env::var("CLAWCAM_WEBHOOK")
+            .context("no webhook URL — pass --webhook or set CLAWCAM_WEBHOOK")?,
+    };
+    let webhook_url = webhook_url_owned.as_str();
+
+    // Resolve webhook token: CLI arg takes precedence, then env var from EnvironmentFile
+    let webhook_token_owned = match webhook_token {
+        Some(t) => Some(t.to_string()),
+        None => std::env::var("CLAWCAM_WEBHOOK_TOKEN").ok(),
+    };
+    let webhook_token: Option<&str> = webhook_token_owned.as_deref();
+
     let camera_source =
         std::env::var("CLAWCAM_CAMERA_SOURCE").unwrap_or_else(|_| "v4l2src".to_string());
     let model_path = std::env::var("CLAWCAM_MODEL_PATH")
@@ -38,6 +54,19 @@ pub async fn run_monitor(
         .map(String::from)
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "unknown".to_string());
+
+    // Create a restricted runtime directory for frame data.
+    // Try /run/clawcam first, fall back to XDG_RUNTIME_DIR, then /tmp.
+    let frame_dir = ["/run/clawcam"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .chain(dirs::runtime_dir().map(|d| d.join("clawcam")))
+        .find(|d| {
+            std::fs::create_dir_all(d).is_ok()
+                && std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).is_ok()
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let latest_frame_path = frame_dir.join("clawcam_latest.jpg");
 
     info!("starting monitor: camera={camera_source} model={model_path}");
 
@@ -74,7 +103,10 @@ pub async fn run_monitor(
 
         // Always write latest frame so _snap can read it without opening the camera
         if let Ok(jpeg) = pipeline::grab_jpeg(&gst_pipeline) {
-            let _ = std::fs::write("/tmp/clawcam_latest.jpg", &jpeg);
+            if std::fs::write(&latest_frame_path, &jpeg).is_ok() {
+                // Ensure the file is only readable by the owning user
+                std::fs::set_permissions(&latest_frame_path, std::fs::Permissions::from_mode(0o600)).ok();
+            }
         }
 
         // If we got detections and cooldown has elapsed, fire webhook

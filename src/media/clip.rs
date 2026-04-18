@@ -11,12 +11,12 @@ pub async fn run_clip(dev: &Device, duration: u32, out: Option<&str>) -> Result<
     let remote_path = "/tmp/clawcam_clip.mp4";
 
     session::run_cmd(dev, &format!(
-        "clawcam _clip --dur {duration} --out {remote_path}"
+        "clawcam _clip --dur {duration} --out '{remote_path}'"
     )).await.context("clip failed on device — is clawcam installed?")?;
 
     let local_path = out.unwrap_or("clip.mp4");
     session::scp_from(dev, remote_path, local_path).await?;
-    session::run_cmd(dev, &format!("rm -f {remote_path}")).await?;
+    session::run_cmd(dev, &format!("rm -f '{remote_path}'")).await?;
 
     println!("clip saved to {local_path} ({duration}s)");
     Ok(())

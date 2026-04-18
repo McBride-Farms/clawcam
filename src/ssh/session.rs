@@ -9,7 +9,7 @@ pub async fn run_cmd(dev: &Device, cmd: &str) -> Result<String> {
     let output = Command::new("ssh")
         .args([
             "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
+            "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=10",
             "-p", &dev.port.to_string(),
             &format!("{}@{}", dev.user, dev.host),
@@ -34,7 +34,7 @@ pub async fn scp_to(dev: &Device, local: &str, remote: &str) -> Result<()> {
     let status = Command::new("scp")
         .args([
             "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
+            "-o", "StrictHostKeyChecking=accept-new",
             "-P", &dev.port.to_string(),
             local,
             &format!("{}@{}:{}", dev.user, dev.host, remote),
@@ -56,7 +56,7 @@ pub async fn scp_from(dev: &Device, remote: &str, local: &str) -> Result<()> {
     let status = Command::new("scp")
         .args([
             "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
+            "-o", "StrictHostKeyChecking=accept-new",
             "-P", &dev.port.to_string(),
             &format!("{}@{}:{}", dev.user, dev.host, remote),
             local,

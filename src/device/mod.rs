@@ -48,6 +48,9 @@ impl DeviceRegistry {
     }
 
     pub fn add(&mut self, name: &str, host: &str, port: u16, user: &str) -> Result<()> {
+        validate_device_name(name)?;
+        validate_host(host)?;
+        validate_user(user)?;
         if self.devices.contains_key(name) {
             bail!("device '{name}' already exists");
         }
@@ -80,4 +83,37 @@ impl DeviceRegistry {
     pub fn list(&self) -> Vec<&Device> {
         self.devices.values().collect()
     }
+}
+
+/// Device names must be alphanumeric with dashes or underscores, 1-64 chars.
+fn validate_device_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        bail!("device name must be 1-64 characters");
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("device name may only contain alphanumeric characters, dashes, and underscores");
+    }
+    Ok(())
+}
+
+/// Host must look like an IP address or hostname — no shell metacharacters.
+fn validate_host(host: &str) -> Result<()> {
+    if host.is_empty() || host.len() > 253 {
+        bail!("host must be 1-253 characters");
+    }
+    if !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':') {
+        bail!("host contains invalid characters — expected IP address or hostname");
+    }
+    Ok(())
+}
+
+/// SSH user must be a valid Unix username — alphanumeric, dashes, underscores.
+fn validate_user(user: &str) -> Result<()> {
+    if user.is_empty() || user.len() > 32 {
+        bail!("user must be 1-32 characters");
+    }
+    if !user.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("user contains invalid characters");
+    }
+    Ok(())
 }

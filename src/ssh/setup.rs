@@ -76,9 +76,29 @@ pub async fn run_setup(
 
     // 6. Create systemd service
     info!("creating systemd service...");
-    let token_flag = webhook_token
-        .map(|t| format!("--webhook-token '{t}'"))
-        .unwrap_or_default();
+
+    // Write secrets to an environment file with restricted permissions (0600)
+    // so the webhook token never appears in the service unit or process list.
+    let mut env_contents = format!(
+        "CLAWCAM_WEBHOOK={webhook}\n\
+         CLAWCAM_CAMERA_SOURCE={cam_source}\n\
+         CLAWCAM_MODEL_PATH={REMOTE_MODEL}\n"
+    );
+    if let Some(token) = webhook_token {
+        env_contents.push_str(&format!("CLAWCAM_WEBHOOK_TOKEN={token}\n"));
+    }
+
+    let tmp_env = "/tmp/clawcam_env_tmp";
+    std::fs::write(tmp_env, &env_contents)?;
+    session::scp_to(dev, tmp_env, "/tmp/clawcam.env").await?;
+    std::fs::remove_file(tmp_env).ok();
+    session::run_cmd(dev, "\
+        sudo mv /tmp/clawcam.env /etc/clawcam.env && \
+        sudo chmod 600 /etc/clawcam.env && \
+        sudo chown root:root /etc/clawcam.env"
+    ).await?;
+    info!("installed environment file");
+
     let service = format!(
         r#"[Unit]
 Description=ClawCam AI Detection Monitor
@@ -88,13 +108,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User={user}
+EnvironmentFile=/etc/clawcam.env
 ExecStart={REMOTE_BIN} monitor \
-    --webhook '{webhook}' \
-    {token_flag} \
     --host '{host}' \
     --log-path /var/log/clawcam.log
-Environment=CLAWCAM_CAMERA_SOURCE={cam_source}
-Environment=CLAWCAM_MODEL_PATH={REMOTE_MODEL}
 Restart=always
 RestartSec=5
 
