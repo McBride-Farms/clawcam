@@ -14,6 +14,16 @@ pub struct Detection {
     pub bottom: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackInfo {
+    pub track_id: u64,
+    pub class: String,
+    pub duration_secs: f64,
+    pub movement_px: f32,
+    pub is_stationary: bool,
+    pub bbox: [u32; 4],
+}
+
 #[derive(Debug, Serialize)]
 pub struct WebhookPayload {
     pub ts: String,
@@ -25,9 +35,31 @@ pub struct WebhookPayload {
     pub host: String,
     pub image: String,
     pub predictions: Vec<Detection>,
+
+    // --- temporal / tracking fields (backward-compatible, omitted when None) ---
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_phase: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<Vec<TrackInfo>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_duration_secs: Option<f64>,
+
+    /// Base64-encoded MP4 clip (sent on "end" phase only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clip: Option<String>,
+
+    /// Pre-detection JPEG frames as base64 (sent on "start" phase only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_frames: Option<Vec<String>>,
 }
 
-const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
+const WEBHOOK_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn send(
     url: &str,
@@ -75,6 +107,5 @@ fn is_private_url(url: &str) -> bool {
             IpAddr::V6(v6) => v6.is_loopback(),
         };
     }
-    // .local mDNS hostnames are LAN-only
     host.ends_with(".local")
 }

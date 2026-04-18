@@ -25,3 +25,4 @@ ndarray = "0.17"
 openssh = { version = "0.11", features = ["native-mux"] }
 russh-sftp = "2"
 uuid = { version = "1", features = ["v4"] }
+tempfile = "3"

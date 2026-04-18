@@ -24,7 +24,7 @@ pub async fn run_setup(
         sudo apt-get update -qq && sudo apt-get install -y -qq \
          gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
          gstreamer1.0-plugins-bad gstreamer1.0-libav \
-         v4l-utils libv4l-0"
+         v4l-utils libv4l-0 ffmpeg"
     ).await.context("failed to install dependencies")?;
 
     // 2. Detect camera source

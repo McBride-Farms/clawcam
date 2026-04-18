@@ -2,15 +2,22 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use gstreamer::prelude::*;
 use std::os::unix::fs::PermissionsExt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::detect::event::{EventDecision, EventManager, UpdateReason};
+use crate::detect::frame_buffer::{FrameBuffer, TimestampedFrame};
 use crate::detect::pipeline;
+use crate::detect::tracker::ObjectTracker;
 use crate::detect::yolo::YoloDetector;
-use crate::webhook::{self, WebhookPayload};
+use crate::webhook::{self, Detection, TrackInfo, WebhookPayload};
 
 const INFERENCE_INTERVAL: Duration = Duration::from_millis(500);
-const MOTION_COOLDOWN: Duration = Duration::from_secs(3);
+const FRAME_BUFFER_CAPACITY: usize = 30; // ~3s at 10 FPS
+const PRE_ROLL_FRAMES: usize = 20; // ~2s of pre-detection context for clips
+const PRE_FRAMES_IN_ALERT: usize = 3; // frames to include in initial webhook
+const MAX_CLIP_FRAMES: usize = 300; // ~30s cap
+const STATIONARY_THRESHOLD_PX: f32 = 5.0;
 
 pub async fn run_monitor(
     webhook_url: Option<&str>,
@@ -18,7 +25,6 @@ pub async fn run_monitor(
     host: Option<&str>,
     log_path: Option<&str>,
 ) -> Result<()> {
-    // Set up file logging if requested (try_init to avoid panic if already initialized)
     if let Some(path) = log_path {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -31,7 +37,6 @@ pub async fn run_monitor(
             .try_init();
     }
 
-    // Resolve webhook URL: CLI arg takes precedence, then env var from EnvironmentFile
     let webhook_url_owned = match webhook_url {
         Some(u) => u.to_string(),
         None => std::env::var("CLAWCAM_WEBHOOK")
@@ -39,7 +44,6 @@ pub async fn run_monitor(
     };
     let webhook_url = webhook_url_owned.as_str();
 
-    // Resolve webhook token: CLI arg takes precedence, then env var from EnvironmentFile
     let webhook_token_owned = match webhook_token {
         Some(t) => Some(t.to_string()),
         None => std::env::var("CLAWCAM_WEBHOOK_TOKEN").ok(),
@@ -55,8 +59,6 @@ pub async fn run_monitor(
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Create a restricted runtime directory for frame data.
-    // Try /run/clawcam first, fall back to XDG_RUNTIME_DIR, then /tmp.
     let frame_dir = ["/run/clawcam"]
         .iter()
         .map(std::path::PathBuf::from)
@@ -70,19 +72,21 @@ pub async fn run_monitor(
 
     info!("starting monitor: camera={camera_source} model={model_path}");
 
-    // Load YOLO model
     let mut detector = YoloDetector::load(&model_path)?;
     info!("YOLO model loaded");
 
-    // Start GStreamer pipeline
     let (frame_rx, gst_pipeline) = pipeline::create_pipeline(&camera_source, 1280, 720, 10)?;
     gst_pipeline.set_state(gstreamer::State::Playing)?;
     info!("pipeline started");
 
-    let mut last_event = Instant::now() - MOTION_COOLDOWN;
+    // Adaptive monitoring components
+    let mut frame_buffer = FrameBuffer::new(FRAME_BUFFER_CAPACITY);
+    let mut tracker = ObjectTracker::new();
+    let mut event_mgr = EventManager::new();
+    let mut event_id: Option<String> = None;
+    let mut clip_frames: Vec<TimestampedFrame> = Vec::new();
 
     loop {
-        // Wait for a frame
         let frame = match frame_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(f) => f,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -91,6 +95,37 @@ pub async fn run_monitor(
             }
             Err(_) => break,
         };
+
+        // Grab JPEG for buffer and latest-frame file
+        let jpeg = match pipeline::grab_jpeg(&gst_pipeline) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+
+        // Write latest frame for _snap
+        if std::fs::write(&latest_frame_path, &jpeg).is_ok() {
+            std::fs::set_permissions(
+                &latest_frame_path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .ok();
+        }
+
+        // Push to rolling buffer
+        frame_buffer.push(jpeg.clone());
+
+        // If we're in an active event, stash frames for clip assembly
+        if event_mgr.is_recording() {
+            clip_frames.push(TimestampedFrame {
+                jpeg: jpeg.clone(),
+                captured_at: std::time::Instant::now(),
+                epoch: chrono::Utc::now().timestamp(),
+            });
+            // Hard cap to bound memory (~15 MB at 50KB/frame)
+            if clip_frames.len() > MAX_CLIP_FRAMES {
+                clip_frames.drain(..clip_frames.len() - MAX_CLIP_FRAMES);
+            }
+        }
 
         // Run inference
         let detections = match detector.detect(&frame.data, frame.width, frame.height) {
@@ -101,56 +136,256 @@ pub async fn run_monitor(
             }
         };
 
-        // Always write latest frame so _snap can read it without opening the camera
-        if let Ok(jpeg) = pipeline::grab_jpeg(&gst_pipeline) {
-            if std::fs::write(&latest_frame_path, &jpeg).is_ok() {
-                // Ensure the file is only readable by the owning user
-                std::fs::set_permissions(&latest_frame_path, std::fs::Permissions::from_mode(0o600)).ok();
+        // Update tracker
+        let tracks = tracker.update(&detections);
+        let has_new = event_mgr
+            .event_start()
+            .map(|s| tracker.has_new_arrivals_since(s))
+            .unwrap_or(false);
+
+        // Evaluate what to do
+        let decision = event_mgr.evaluate(&tracks, has_new);
+
+        match decision {
+            EventDecision::Quiet => {}
+
+            EventDecision::InitialAlert { tracks: trks } => {
+                let eid = uuid::Uuid::new_v4().to_string();
+                event_id = Some(eid.clone());
+
+                // Seed clip buffer with pre-roll frames
+                clip_frames = frame_buffer.clone_recent(PRE_ROLL_FRAMES);
+
+                // Build pre-detection frames for the webhook
+                let pre = frame_buffer
+                    .recent(PRE_FRAMES_IN_ALERT)
+                    .iter()
+                    .map(|f| b64(&f.jpeg))
+                    .collect::<Vec<_>>();
+
+                let summary = format_tracks(&trks);
+                info!("event {eid}: initial alert — {summary}");
+
+                fire_webhook(
+                    webhook_url,
+                    webhook_token,
+                    &hostname,
+                    &detections,
+                    &jpeg,
+                    "ai_detected",
+                    "start",
+                    &eid,
+                    &trks,
+                    None,
+                    None,
+                    Some(pre),
+                );
+            }
+
+            EventDecision::Update { tracks: trks, reason } => {
+                if let Some(ref eid) = event_id {
+                    let detail = match reason {
+                        UpdateReason::NewArrival => "ai_new_arrival",
+                        UpdateReason::Prolonged => "ai_tracking_update",
+                    };
+                    let dur = tracker.longest_duration().map(|d| d.as_secs_f64());
+                    let summary = format_tracks(&trks);
+                    info!("event {eid}: update ({detail}) — {summary}");
+
+                    fire_webhook(
+                        webhook_url,
+                        webhook_token,
+                        &hostname,
+                        &detections,
+                        &jpeg,
+                        detail,
+                        "update",
+                        eid,
+                        &trks,
+                        dur,
+                        None,
+                        None,
+                    );
+                }
+            }
+
+            EventDecision::Complete { total_duration, .. } => {
+                if let Some(ref eid) = event_id {
+                    let dur_secs = total_duration.as_secs_f64();
+                    info!(
+                        "event {eid}: complete — {:.1}s, assembling clip from {} frames",
+                        dur_secs,
+                        clip_frames.len()
+                    );
+
+                    // Assemble clip in background if we have enough frames
+                    let clip_b64 = if clip_frames.len() > 10 {
+                        match assemble_clip(&clip_frames, &frame_dir).await {
+                            Ok(data) => {
+                                info!("clip assembled: {}KB", data.len() / 1024);
+                                Some(data)
+                            }
+                            Err(e) => {
+                                warn!("clip assembly failed: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Get the last known tracks (they may be empty since objects left)
+                    let last_tracks = tracker.active_tracks().to_vec();
+
+                    fire_webhook(
+                        webhook_url,
+                        webhook_token,
+                        &hostname,
+                        &detections,
+                        &jpeg,
+                        "ai_event_complete",
+                        "end",
+                        eid,
+                        &last_tracks,
+                        Some(dur_secs),
+                        clip_b64.as_deref(),
+                        None,
+                    );
+                }
+
+                event_id = None;
+                clip_frames.clear();
             }
         }
 
-        // If we got detections and cooldown has elapsed, fire webhook
-        if !detections.is_empty() && last_event.elapsed() >= MOTION_COOLDOWN {
-            last_event = Instant::now();
-
-            info!(
-                "detected: {}",
-                detections
-                    .iter()
-                    .map(|d| format!("{}({:.0}%)", d.class, d.score * 100.0))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-
-            let jpeg = pipeline::grab_jpeg(&gst_pipeline).unwrap_or_default();
-            let image_b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
-
-            let now = chrono::Utc::now();
-            let payload = WebhookPayload {
-                ts: now.format("%b %d %H:%M:%S").to_string(),
-                epoch: now.timestamp(),
-                event_type: "motion".to_string(),
-                detail: "ai_detected".to_string(),
-                source: "clawcam".to_string(),
-                host: hostname.clone(),
-                image: image_b64,
-                predictions: detections,
-            };
-
-            let url = webhook_url.to_string();
-            let token = webhook_token.map(String::from);
-            tokio::spawn(async move {
-                if let Err(e) = webhook::send(&url, token.as_deref(), &payload).await {
-                    warn!("webhook send failed: {e}");
-                }
-            });
-        }
-
-        // Pace inference
         tokio::time::sleep(INFERENCE_INTERVAL).await;
     }
 
     gst_pipeline.set_state(gstreamer::State::Null)?;
     info!("monitor stopped");
     Ok(())
+}
+
+fn b64(data: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn format_tracks(
+    tracks: &[crate::detect::tracker::TrackedObject],
+) -> String {
+    tracks
+        .iter()
+        .map(|t| {
+            format!(
+                "{}#{} ({:.0}%, {:.1}s)",
+                t.class,
+                t.track_id,
+                t.score * 100.0,
+                t.duration().as_secs_f64()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn build_track_info(
+    tracks: &[crate::detect::tracker::TrackedObject],
+) -> Vec<TrackInfo> {
+    tracks
+        .iter()
+        .map(|t| TrackInfo {
+            track_id: t.track_id,
+            class: t.class.clone(),
+            duration_secs: t.duration().as_secs_f64(),
+            movement_px: t.movement(),
+            is_stationary: t.is_stationary(STATIONARY_THRESHOLD_PX),
+            bbox: [t.bbox.left, t.bbox.top, t.bbox.right, t.bbox.bottom],
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fire_webhook(
+    webhook_url: &str,
+    webhook_token: Option<&str>,
+    hostname: &str,
+    detections: &[Detection],
+    jpeg: &[u8],
+    detail: &str,
+    phase: &str,
+    event_id: &str,
+    tracks: &[crate::detect::tracker::TrackedObject],
+    event_duration_secs: Option<f64>,
+    clip: Option<&str>,
+    pre_frames: Option<Vec<String>>,
+) {
+    let now = chrono::Utc::now();
+    let payload = WebhookPayload {
+        ts: now.format("%b %d %H:%M:%S").to_string(),
+        epoch: now.timestamp(),
+        event_type: "motion".to_string(),
+        detail: detail.to_string(),
+        source: "clawcam".to_string(),
+        host: hostname.to_string(),
+        image: b64(jpeg),
+        predictions: detections.to_vec(),
+        event_id: Some(event_id.to_string()),
+        event_phase: Some(phase.to_string()),
+        tracks: Some(build_track_info(tracks)),
+        event_duration_secs,
+        clip: clip.map(String::from),
+        pre_frames,
+    };
+
+    let url = webhook_url.to_string();
+    let token = webhook_token.map(String::from);
+    tokio::spawn(async move {
+        if let Err(e) = webhook::send(&url, token.as_deref(), &payload).await {
+            warn!("webhook send failed: {e}");
+        }
+    });
+}
+
+/// Assemble JPEG frames into an MP4 clip using ffmpeg, return as base64.
+async fn assemble_clip(
+    frames: &[TimestampedFrame],
+    working_dir: &std::path::Path,
+) -> Result<String> {
+    let tmp_dir = tempfile::tempdir_in(working_dir)
+        .or_else(|_| tempfile::tempdir())
+        .context("failed to create temp dir")?;
+
+    // Write frames as numbered JPEGs
+    for (i, frame) in frames.iter().enumerate() {
+        let path = tmp_dir.path().join(format!("frame_{i:04}.jpg"));
+        std::fs::write(&path, &frame.jpeg)?;
+    }
+
+    let clip_path = tmp_dir.path().join("clip.mp4");
+
+    let output = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-framerate", "10",
+            "-i", &format!("{}/frame_%04d.jpg", tmp_dir.path().display()),
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            clip_path.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .context("failed to run ffmpeg — is it installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffmpeg failed: {stderr}");
+    }
+
+    let clip_bytes = tokio::fs::read(&clip_path).await?;
+    Ok(b64(&clip_bytes))
 }

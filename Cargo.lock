@@ -379,6 +379,7 @@ dependencies = [
  "russh-sftp",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
