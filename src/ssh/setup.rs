@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use base64::Engine;
 use std::path::PathBuf;
 use tracing::info;
 

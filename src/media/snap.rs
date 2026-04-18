@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
 
 use crate::device::Device;
 use crate::ssh::session;
@@ -25,12 +28,10 @@ pub async fn run_snap(dev: &Device, out: Option<&str>) -> Result<()> {
 /// On-device snap: if the monitor is running, read its latest frame.
 /// Otherwise, open the camera directly.
 pub fn run_snap_local(out: &str) -> Result<()> {
-    // If the monitor is running, it writes /tmp/clawcam_latest.jpg every detection
     let latest = std::path::Path::new(LATEST_FRAME);
     if latest.exists() {
         let metadata = std::fs::metadata(latest)?;
         let age = metadata.modified()?.elapsed().unwrap_or_default();
-        // Use the cached frame if it's less than 10 seconds old
         if age.as_secs() < 10 {
             std::fs::copy(latest, out)?;
             println!("{out}");
@@ -38,34 +39,51 @@ pub fn run_snap_local(out: &str) -> Result<()> {
         }
     }
 
-    // Monitor not running or frame too stale — open camera directly
     capture_fresh(out)
 }
 
-/// Open the camera via GStreamer and capture a single JPEG frame.
+/// Open the camera via GStreamer Rust API and capture a single JPEG frame.
 fn capture_fresh(out: &str) -> Result<()> {
-    use gstreamer as gst;
-    use gstreamer::prelude::*;
-    use gstreamer_app as gst_app;
-
     gst::init().context("failed to initialize GStreamer")?;
 
-    let source = detect_source();
+    let source_name = detect_source();
+    let pipeline = gst::Pipeline::default();
 
-    let pipeline = gst::parse::launch(&format!(
-        "{source} ! videoconvert ! videoscale ! \
-         video/x-raw,width=1920,height=1080 ! jpegenc quality=90 ! \
-         appsink name=sink emit-signals=true max-buffers=1 drop=true"
-    ))
-    .context("failed to create snap pipeline")?
-    .downcast::<gst::Pipeline>()
-    .map_err(|_| anyhow::anyhow!("pipeline cast failed"))?;
+    let source = gst::ElementFactory::make(&source_name)
+        .build()
+        .context(format!("failed to create {source_name} element"))?;
 
-    let sink = pipeline
-        .by_name("sink")
-        .context("sink not found")?
-        .downcast::<gst_app::AppSink>()
-        .map_err(|_| anyhow::anyhow!("appsink cast failed"))?;
+    let convert = gst::ElementFactory::make("videoconvert")
+        .build()
+        .context("failed to create videoconvert")?;
+
+    let scale = gst::ElementFactory::make("videoscale")
+        .build()
+        .context("failed to create videoscale")?;
+
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", 1920i32)
+                .field("height", 1080i32)
+                .build(),
+        )
+        .build()
+        .context("failed to create capsfilter")?;
+
+    let encoder = gst::ElementFactory::make("jpegenc")
+        .property("quality", 90i32)
+        .build()
+        .context("failed to create jpegenc")?;
+
+    let sink = gst_app::AppSink::builder()
+        .max_buffers(1)
+        .drop(true)
+        .build();
+
+    pipeline.add_many([&source, &convert, &scale, &capsfilter, &encoder, sink.upcast_ref()])?;
+    gst::Element::link_many([&source, &convert, &scale, &capsfilter, &encoder, sink.upcast_ref()])?;
 
     pipeline.set_state(gst::State::Playing)?;
 

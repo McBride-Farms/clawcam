@@ -11,48 +11,92 @@ pub struct Frame {
     pub height: u32,
 }
 
-/// Build and run a GStreamer pipeline that captures frames for inference.
+/// Build a GStreamer pipeline that captures frames for inference.
 ///
-/// `source` is a GStreamer source element string, e.g.:
-/// - `libcamerasrc` (Pi Camera Module)
-/// - `v4l2src device=/dev/video0` (USB webcam)
-/// - `videotestsrc` (for testing)
+/// Pipeline layout:
+///   source → convert → scale → capsfilter → tee
+///     tee → queue → jpegenc → jpeg_sink (for snapshots / webhook images)
+///     tee → queue → convert → capsfilter(RGB) → rgb_sink (for YOLO inference)
 ///
-/// Returns a receiver that yields JPEG frames and a pipeline handle.
+/// Returns a receiver that yields RGB frames and the pipeline handle.
 pub fn create_pipeline(
-    source: &str,
+    source_name: &str,
     width: u32,
     height: u32,
     fps: u32,
 ) -> Result<(mpsc::Receiver<Frame>, gst::Pipeline)> {
     gst::init().context("failed to initialize GStreamer")?;
 
-    // Build pipeline:
-    // source ! videoconvert ! videoscale ! capsfilter ! tee
-    //   tee.src_0 ! queue ! jpegenc ! appsink (for snapshots / webhook images)
-    //   tee.src_1 ! queue ! videoconvert ! capsfilter(RGB) ! appsink (for inference)
-    let pipeline_str = format!(
-        "{source} ! videoconvert ! videoscale ! \
-         video/x-raw,width={width},height={height},framerate={fps}/1 ! tee name=t \
-         t. ! queue ! jpegenc quality=85 ! appsink name=jpeg_sink emit-signals=true max-buffers=2 drop=true \
-         t. ! queue ! videoconvert ! video/x-raw,format=RGB ! \
-         appsink name=rgb_sink emit-signals=true max-buffers=2 drop=true"
-    );
+    let pipeline = gst::Pipeline::default();
 
-    let pipeline = gst::parse::launch(&pipeline_str)
-        .context("failed to parse GStreamer pipeline")?
-        .downcast::<gst::Pipeline>()
-        .map_err(|_| anyhow::anyhow!("pipeline cast failed"))?;
+    // Source
+    let source = gst::ElementFactory::make(source_name)
+        .build()
+        .context(format!("failed to create {source_name}"))?;
 
+    // Common path: convert → scale → caps → tee
+    let convert = gst::ElementFactory::make("videoconvert").build()?;
+    let scale = gst::ElementFactory::make("videoscale").build()?;
+    let caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", width as i32)
+                .field("height", height as i32)
+                .field("framerate", gst::Fraction::new(fps as i32, 1))
+                .build(),
+        )
+        .build()?;
+    let tee = gst::ElementFactory::make("tee").build()?;
+
+    // JPEG branch: queue → jpegenc → appsink
+    let jpeg_queue = gst::ElementFactory::make("queue").build()?;
+    let jpegenc = gst::ElementFactory::make("jpegenc")
+        .property("quality", 85i32)
+        .build()?;
+    let jpeg_sink = gst_app::AppSink::builder()
+        .name("jpeg_sink")
+        .max_buffers(2)
+        .drop(true)
+        .build();
+
+    // RGB branch: queue → videoconvert → capsfilter(RGB) → appsink
+    let rgb_queue = gst::ElementFactory::make("queue").build()?;
+    let rgb_convert = gst::ElementFactory::make("videoconvert").build()?;
+    let rgb_caps = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "RGB")
+                .build(),
+        )
+        .build()?;
+    let rgb_sink = gst_app::AppSink::builder()
+        .name("rgb_sink")
+        .max_buffers(2)
+        .drop(true)
+        .build();
+
+    // Add all elements
+    pipeline.add_many([
+        &source, &convert, &scale, &caps, &tee,
+        &jpeg_queue, &jpegenc, jpeg_sink.upcast_ref(),
+        &rgb_queue, &rgb_convert, &rgb_caps, rgb_sink.upcast_ref(),
+    ])?;
+
+    // Link common path
+    gst::Element::link_many([&source, &convert, &scale, &caps, &tee])?;
+
+    // Link JPEG branch
+    gst::Element::link_many([&jpeg_queue, &jpegenc, jpeg_sink.upcast_ref()])?;
+    tee.link_pads(None, &jpeg_queue, None)?;
+
+    // Link RGB branch
+    gst::Element::link_many([&rgb_queue, &rgb_convert, &rgb_caps, rgb_sink.upcast_ref()])?;
+    tee.link_pads(None, &rgb_queue, None)?;
+
+    // Set up callback for RGB frames
     let (tx, rx) = mpsc::sync_channel::<Frame>(4);
-
-    // RGB sink for inference frames
-    let rgb_sink = pipeline
-        .by_name("rgb_sink")
-        .context("rgb_sink not found")?
-        .downcast::<gst_app::AppSink>()
-        .map_err(|_| anyhow::anyhow!("rgb_sink cast failed"))?;
-
     let w = width;
     let h = height;
     rgb_sink.set_callbacks(
