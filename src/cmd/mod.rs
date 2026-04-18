@@ -92,6 +92,25 @@ pub enum Command {
         name: String,
     },
 
+    /// On-device: capture a JPEG snapshot (used internally by remote snap)
+    #[command(name = "_snap", hide = true)]
+    SnapLocal {
+        /// Output file path
+        #[arg(long)]
+        out: String,
+    },
+
+    /// On-device: record a video clip (used internally by remote clip)
+    #[command(name = "_clip", hide = true)]
+    ClipLocal {
+        /// Duration in seconds
+        #[arg(long, default_value = "10")]
+        dur: u32,
+        /// Output file path
+        #[arg(long)]
+        out: String,
+    },
+
     /// Run the on-device detection monitor (not for direct use)
     Monitor {
         /// Webhook URL
@@ -170,6 +189,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             let registry = DeviceRegistry::load()?;
             let dev = registry.get(&name)?;
             crate::ssh::teardown::run_teardown(&dev).await
+        }
+        Command::SnapLocal { out } => {
+            crate::media::snap::run_snap_local(&out)
+        }
+        Command::ClipLocal { dur, out } => {
+            crate::media::clip::run_clip_local(dur, &out)
         }
         Command::Monitor { webhook, webhook_token, host, log_path } => {
             crate::detect::monitor::run_monitor(&webhook, webhook_token.as_deref(), host.as_deref(), log_path.as_deref()).await

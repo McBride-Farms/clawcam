@@ -1,66 +1,61 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::device::Device;
 use crate::ssh::session;
 
+/// Remote snap: SSHes into the device and runs `clawcam _snap` there.
 pub async fn run_snap(dev: &Device, out: Option<&str>) -> Result<()> {
     let remote_path = "/tmp/clawcam_snap.jpg";
 
-    // Priority 1: rpicam-apps (Pi 4/5 with Pi Camera Module — Pi OS default)
-    let rpicam_result = session::run_cmd(dev, &format!(
-        "rpicam-still -t 1000 -n -o {remote_path} --width 1920 --height 1080 --timeout 2000 --quality 90 2>&1"
-    )).await;
+    session::run_cmd(dev, &format!(
+        "clawcam _snap --out {remote_path}"
+    )).await.context("snap failed on device — is clawcam installed?")?;
 
-    if rpicam_result.is_ok() {
-        let local_path = out.unwrap_or("snapshot.jpg");
-        session::scp_from(dev, remote_path, local_path).await?;
-        session::run_cmd(dev, &format!("rm -f {remote_path}")).await?;
-        println!("snapshot saved to {local_path}(rpicam-still)");
-        return Ok(());
-    }
+    let local_path = out.unwrap_or("snapshot.jpg");
+    session::scp_from(dev, remote_path, local_path).await?;
+    session::run_cmd(dev, &format!("rm -f {remote_path}")).await?;
 
-    // Priority 2: GStreamer with libcamerasrc (Pi Camera Module via libcamera on Ubuntu)
-    let gst_libcam = session::run_cmd(dev, &format!(
-        "timeout 10 gst-launch-1.0 -e libcamerasrc ! \
-         video/x-raw,width=1920,height=1080 ! videoconvert \
-         ! jpegenc quality=90 ! multifilesink location={remote_path} max-files=1 2>&1"
-    )).await;
+    println!("snapshot saved to {local_path}");
+    Ok(())
+}
 
-    if gst_libcam.is_ok() {
-        let local_path = out.unwrap_or("snapshot.jpg");
-        session::scp_from(dev, remote_path, local_path).await?;
-        session::run_cmd(dev, &format!("rm -f {remote_path}")).await?;
-        println!("snapshot saved to {local_path}(libcamerasrc)");
-        return Ok(());
-    }
+/// On-device snap: uses GStreamer Rust API to capture a single JPEG frame.
+pub fn run_snap_local(out: &str) -> Result<()> {
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use gstreamer_app as gst_app;
 
-    // Priority 3: GStreamer with v4l2src (USB webcams, conference cams)
-    let result = session::run_cmd(dev, &format!(
-        "timeout 10 gst-launch-1.0 -e v4l2src num-buffers=1 ! \
-         videoconvert ! videoscale ! video/x-raw,width=1920,height=1080 \
-         ! jpegenc quality=90 ! multifilesink location={remote_path} max-files=1 2>&1"
-    )).await;
+    gst::init().context("failed to initialize GStreamer")?;
 
-    if result.is_ok() {
-        let local_path = out.unwrap_or("snapshot.jpg");
-        session::scp_from(dev, remote_path, local_path).await?;
-        session::run_cmd(dev, &format!("rm -f {remote_path}")).await?;
-        println!("snapshot saved to {local_path}(v4l2src)");
-        return Ok(());
-    }
+    let source = std::env::var("CLAWCAM_CAMERA_SOURCE")
+        .unwrap_or_else(|_| "v4l2src".to_string());
 
-    // Check if there's an existing snapshot from the monitor
-    let existing = session::run_cmd(dev, &format!(
-        "test -f {remote_path} && echo 'found' || echo 'none'"
-    )).await;
+    let pipeline = gst::parse::launch(&format!(
+        "{source} num-buffers=1 ! videoconvert ! videoscale ! \
+         video/x-raw,width=1920,height=1080 ! jpegenc quality=90 ! \
+         appsink name=sink emit-signals=true"
+    ))
+    .context("failed to create snap pipeline")?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| anyhow::anyhow!("pipeline cast failed"))?;
 
-    if existing.as_deref().unwrap_or("") == "found" {
-        let local_path = out.unwrap_or("snapshot.jpg");
-        session::scp_from(dev, remote_path, local_path).await?;
-        session::run_cmd(dev, &format!("rm -f {remote_path}")).await?;
-        println!("snapshot saved to {local_path}(existing)");
-        return Ok(());
-    }
+    let sink = pipeline
+        .by_name("sink")
+        .context("sink not found")?
+        .downcast::<gst_app::AppSink>()
+        .map_err(|_| anyhow::anyhow!("appsink cast failed"))?;
 
-    anyhow::bail!("failed to capture snapshot — no camera source available")
+    pipeline.set_state(gst::State::Playing)?;
+
+    let sample = sink
+        .pull_sample()
+        .map_err(|_| anyhow::anyhow!("failed to capture frame"))?;
+    let buffer = sample.buffer().context("no buffer")?;
+    let map = buffer.map_readable()?;
+
+    std::fs::write(out, map.as_slice())?;
+
+    pipeline.set_state(gst::State::Null)?;
+    println!("{out}");
+    Ok(())
 }
