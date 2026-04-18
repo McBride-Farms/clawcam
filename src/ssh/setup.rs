@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use std::path::PathBuf;
 use tracing::info;
 
@@ -104,10 +105,15 @@ WantedBy=multi-user.target
         host = dev.host,
     );
 
-    let escaped = service.replace('\'', "'\\''");
-    session::run_cmd(dev, &format!(
-        "echo '{escaped}' | sudo tee /etc/systemd/system/{SERVICE_NAME}.service > /dev/null"
-    )).await?;
+    // Write service file via temp file + SCP
+    let tmp_local = "/tmp/clawcam_service_tmp";
+    std::fs::write(tmp_local, &service)?;
+    info!("wrote local service file");
+    session::scp_to(dev, tmp_local, "/tmp/clawcam.service").await?;
+    std::fs::remove_file(tmp_local).ok();
+    info!("SCP'd service file to device");
+    session::run_cmd(dev, "sudo mv /tmp/clawcam.service /etc/systemd/system/clawcam.service").await?;
+    info!("installed service file");
 
     // 7. Enable and start
     session::run_cmd(dev, &format!(

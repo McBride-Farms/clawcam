@@ -17,18 +17,17 @@ pub async fn run_monitor(
     host: Option<&str>,
     log_path: Option<&str>,
 ) -> Result<()> {
-    // Set up file logging if requested
+    // Set up file logging if requested (try_init to avoid panic if already initialized)
     if let Some(path) = log_path {
-        // Append-mode file logging via tracing
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .context("failed to open log file")?;
-        let _guard = tracing_subscriber::fmt()
+        let _ = tracing_subscriber::fmt()
             .with_writer(file)
             .with_ansi(false)
-            .init();
+            .try_init();
     }
 
     let camera_source =
