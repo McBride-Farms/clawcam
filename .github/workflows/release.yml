@@ -77,8 +77,6 @@ jobs:
       matrix:
         include:
           - target: aarch64-unknown-linux-gnu
-            artifact: clawcam-linux-arm64
-          - target: aarch64-unknown-linux-gnu
             artifact: clawcam-pi-arm64
           - target: armv7-unknown-linux-gnueabihf
             artifact: clawcam-pi-armv7
@@ -95,6 +93,8 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build with cross
+        env:
+          CROSS_CONTAINER_OPTS: "-e ORT_CACHE_DIR=/tmp/ort-cache"
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Package binary
@@ -177,7 +177,6 @@ jobs:
             | File | Description |
             |------|-------------|
             | `clawcam-linux-amd64` | Host CLI — Linux x86_64 |
-            | `clawcam-linux-arm64` | Host CLI — Linux ARM64 |
             | `clawcam-darwin-amd64` | Host CLI — macOS Intel |
             | `clawcam-darwin-arm64` | Host CLI — macOS Apple Silicon |
             | `clawcam-pi-arm64` | Device binary — Raspberry Pi 4/5 (64-bit) |
