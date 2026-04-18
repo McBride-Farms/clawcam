@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::device::Device;
 use crate::ssh::session;
+use crate::media::detect_source;
 
 /// Remote snap: SSHes into the device and runs `clawcam _snap` there.
 pub async fn run_snap(dev: &Device, out: Option<&str>) -> Result<()> {
@@ -27,11 +28,10 @@ pub fn run_snap_local(out: &str) -> Result<()> {
 
     gst::init().context("failed to initialize GStreamer")?;
 
-    let source = std::env::var("CLAWCAM_CAMERA_SOURCE")
-        .unwrap_or_else(|_| "v4l2src".to_string());
+    let source = detect_source();
 
     let pipeline = gst::parse::launch(&format!(
-        "{source} num-buffers=1 ! videoconvert ! videoscale ! \
+        "{source} ! videoconvert ! videoscale ! \
          video/x-raw,width=1920,height=1080 ! jpegenc quality=90 ! \
          appsink name=sink emit-signals=true"
     ))
@@ -49,7 +49,7 @@ pub fn run_snap_local(out: &str) -> Result<()> {
 
     let sample = sink
         .pull_sample()
-        .map_err(|_| anyhow::anyhow!("failed to capture frame"))?;
+        .map_err(|_| anyhow::anyhow!("failed to capture frame — check camera connection"))?;
     let buffer = sample.buffer().context("no buffer")?;
     let map = buffer.map_readable()?;
 

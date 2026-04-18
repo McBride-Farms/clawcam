@@ -128,35 +128,29 @@ WantedBy=multi-user.target
     Ok(())
 }
 
-/// Detect what camera is available on the Pi.
+/// Detect what camera is available on the Pi using GStreamer.
 async fn detect_camera_source(dev: &Device) -> Result<String> {
-    // Check for rpicam-apps (Pi 4/5 with Pi Camera Module — Pi OS default)
-    let rpicam = session::run_cmd(dev, "command -v rpicam-still 2>/dev/null && rpicam-still --list-cameras 2>&1 | head -10").await;
-    if let Ok(output) = &rpicam {
-        // rpicam-still is installed and may have detected cameras
-        if !output.trim().is_empty() {
-            return Ok("rpicam".to_string());
-        }
-    }
-
-    // Check for libcamera (Pi Camera Module — Ubuntu 24.04, manual install)
-    let libcam = session::run_cmd(dev, "which libcamera-hello 2>/dev/null && libcamera-hello --list-cameras 2>&1 | head -5").await;
-    if let Ok(output) = &libcam {
-        if output.contains("Available cameras") && !output.contains(": 0 cameras") {
+    // Check if libcamerasrc GStreamer element is available (Pi Camera Module)
+    let gst_check = session::run_cmd(dev,
+        "gst-inspect-1.0 libcamerasrc >/dev/null 2>&1 && echo 'libcamerasrc'"
+    ).await;
+    if let Ok(output) = &gst_check {
+        if output.trim() == "libcamerasrc" {
             return Ok("libcamerasrc".to_string());
         }
     }
 
     // Check for V4L2 devices (USB webcams, conference cams)
-    let v4l2 = session::run_cmd(dev, "ls /dev/video* 2>/dev/null | head -1").await;
+    let v4l2 = session::run_cmd(dev,
+        "gst-inspect-1.0 v4l2src >/dev/null 2>&1 && ls /dev/video0 2>/dev/null && echo 'v4l2src'"
+    ).await;
     if let Ok(output) = &v4l2 {
-        let dev_path = output.trim();
-        if !dev_path.is_empty() {
-            return Ok(format!("v4l2src device={dev_path}"));
+        if output.contains("v4l2src") {
+            return Ok("v4l2src".to_string());
         }
     }
 
-    anyhow::bail!("no camera detected on device — connect a Pi Camera Module or USB camera")
+    anyhow::bail!("no camera detected — ensure GStreamer and camera drivers are installed")
 }
 
 /// Find a local cross-compiled binary for the target architecture.

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::device::Device;
 use crate::ssh::session;
+use crate::media::detect_source;
 
 /// Remote clip: SSHes into the device and runs `clawcam _clip` there.
 pub async fn run_clip(dev: &Device, duration: u32, out: Option<&str>) -> Result<()> {
@@ -26,12 +27,11 @@ pub fn run_clip_local(duration: u32, out: &str) -> Result<()> {
 
     gst::init().context("failed to initialize GStreamer")?;
 
-    let source = std::env::var("CLAWCAM_CAMERA_SOURCE")
-        .unwrap_or_else(|_| "v4l2src".to_string());
+    let source = detect_source();
 
     let pipeline = gst::parse::launch(&format!(
-        "{source} ! videoconvert ! video/x-raw,width=1280,height=720,framerate=30/1 ! \
-         x264enc tune=zerolatency bitrate=2000 ! h264parse ! \
+        "{source} ! videoconvert ! video/x-raw,width=1920,height=1080,framerate=30/1 ! \
+         v4l2h264enc ! h264parse ! \
          mp4mux ! filesink location={out}"
     ))
     .context("failed to create clip pipeline")?
@@ -40,13 +40,10 @@ pub fn run_clip_local(duration: u32, out: &str) -> Result<()> {
 
     pipeline.set_state(gst::State::Playing)?;
 
-    // Record for the specified duration
     std::thread::sleep(std::time::Duration::from_secs(duration as u64));
 
-    // Send EOS to finalize the MP4
     pipeline.send_event(gst::event::Eos::new());
 
-    // Wait for EOS to propagate
     let bus = pipeline.bus().context("no bus")?;
     bus.timed_pop_filtered(
         gst::ClockTime::from_seconds(5),
