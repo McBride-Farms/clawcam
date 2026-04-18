@@ -133,7 +133,7 @@ async fn detect_camera_source(dev: &Device) -> Result<String> {
     // Check for rpicam-apps (Pi 4/5 with Pi Camera Module — Pi OS default)
     let rpicam = session::run_cmd(dev, "command -v rpicam-still 2>/dev/null && rpicam-still --list-cameras 2>&1 | head -10").await;
     if let Ok(output) = &rpicam {
-        // rpicam-still is installed and may have found cameras
+        // rpicam-still is installed and may have detected cameras
         if !output.trim().is_empty() {
             return Ok("rpicam".to_string());
         }
