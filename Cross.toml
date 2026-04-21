@@ -1,23 +1,13 @@
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
-    "mkdir -p /tmp/ort-cache",
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update -qq",
-    "apt-get install -y -qq libglib2.0-dev:$CROSS_DEB_ARCH libgstreamer1.0-dev:$CROSS_DEB_ARCH libgstreamer-plugins-base1.0-dev:$CROSS_DEB_ARCH"
+    "apt-get install -y -qq libglib2.0-dev:$CROSS_DEB_ARCH libgstreamer1.0-dev:$CROSS_DEB_ARCH libgstreamer-plugins-base1.0-dev:$CROSS_DEB_ARCH",
 ]
-
-[target.aarch64-unknown-linux-gnu.env]
-volumes = ["ORT_CACHE"]
-passthrough = ["ORT_CACHE_DIR"]
 
 [target.armv7-unknown-linux-gnueabihf]
 pre-build = [
-    "mkdir -p /tmp/ort-cache",
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update -qq",
-    "apt-get install -y -qq libglib2.0-dev:$CROSS_DEB_ARCH libgstreamer1.0-dev:$CROSS_DEB_ARCH libgstreamer-plugins-base1.0-dev:$CROSS_DEB_ARCH"
+    "apt-get install -y -qq libglib2.0-dev:$CROSS_DEB_ARCH libgstreamer1.0-dev:$CROSS_DEB_ARCH libgstreamer-plugins-base1.0-dev:$CROSS_DEB_ARCH",
 ]
-
-[target.armv7-unknown-linux-gnueabihf.env]
-volumes = ["ORT_CACHE"]
-passthrough = ["ORT_CACHE_DIR"]
