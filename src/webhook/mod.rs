@@ -84,7 +84,7 @@ pub async fn send(
 ) -> Result<()> {
     // Reject plaintext HTTP when a bearer token is configured,
     // unless the target is a private/local network address (RFC1918, loopback).
-    if token.is_some() && url.starts_with("http://") && !is_private_url(url) {
+    if token.is_some() && url.starts_with("http://") && !is_private_url(url).await {
         anyhow::bail!(
             "refusing to send bearer token over plaintext HTTP — use https:// for webhook URL"
         );
@@ -107,21 +107,39 @@ pub async fn send(
 }
 
 /// Check if a URL points to a private/local network address (safe for plaintext HTTP).
-fn is_private_url(url: &str) -> bool {
+async fn is_private_url(url: &str) -> bool {
     let host = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .and_then(|s| s.split('/').next())
         .and_then(|s| s.split(':').next())
         .unwrap_or("");
+    if host.is_empty() {
+        return false;
+    }
     if host == "localhost" {
         return true;
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-            IpAddr::V6(v6) => v6.is_loopback(),
-        };
+        return is_private_ip(ip);
     }
-    host.ends_with(".local")
+    if host.ends_with(".local") {
+        return true;
+    }
+    // Resolve DNS: accept the host only if every resolved address is private.
+    // Split-horizon names that also resolve to a public IP are treated as public.
+    match tokio::net::lookup_host(format!("{host}:0")).await {
+        Ok(iter) => {
+            let addrs: Vec<_> = iter.collect();
+            !addrs.is_empty() && addrs.iter().all(|sa| is_private_ip(sa.ip()))
+        }
+        Err(_) => false,
+    }
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
 }
