@@ -22,12 +22,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: clawcam-linux-amd64
-          - target: x86_64-apple-darwin
-            os: macos-13
-            artifact: clawcam-darwin-amd64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: clawcam-darwin-arm64
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -37,18 +31,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             pkg-config
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install gstreamer pkg-config
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -142,8 +130,4 @@ jobs:
             | File | Description |
             |------|-------------|
             | `clawcam-linux-amd64` | Host CLI — Linux x86_64 |
-            | `clawcam-darwin-amd64` | Host CLI — macOS Intel |
-            | `clawcam-darwin-arm64` | Host CLI — macOS Apple Silicon |
-            | `clawcam-pi-arm64` | Device binary — Raspberry Pi 4/5 (64-bit) |
-            | `clawcam-pi-armv7` | Device binary — Raspberry Pi 3/Zero 2 (32-bit) |
             | `yolov8n.onnx` | YOLOv8n detection model (COCO 80-class) |
