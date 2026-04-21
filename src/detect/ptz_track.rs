@@ -117,13 +117,19 @@ impl PtzTracker {
         let endpoint = std::env::var("CLAWCAM_PTZ_HTTP")
             .unwrap_or_else(|_| "http://127.0.0.1:8091/ptz".to_string());
         let token = std::env::var("CLAWCAM_PTZ_TOKEN").ok();
-        let deadzone = env_float("CLAWCAM_PTZ_DEADZONE_PCT", 8.0).clamp(0.0, 50.0) / 100.0;
-        let lookahead_ms = env_int("CLAWCAM_PTZ_LOOKAHEAD_MS", 450).clamp(0, 2000) as f32;
-        let pan_speed_min = env_int("CLAWCAM_PTZ_PAN_SPEED_MIN", 3).clamp(1, 24) as u8;
-        let pan_speed_max = env_int("CLAWCAM_PTZ_PAN_SPEED_MAX", 20).clamp(1, 24) as u8;
-        let tilt_speed_min = env_int("CLAWCAM_PTZ_TILT_SPEED_MIN", 3).clamp(1, 20) as u8;
-        let tilt_speed_max = env_int("CLAWCAM_PTZ_TILT_SPEED_MAX", 16).clamp(1, 20) as u8;
-        let drive_duration_ms = env_int("CLAWCAM_PTZ_DRIVE_MS", 600).clamp(200, 10_000) as u64;
+        // Defaults tuned against a Microdia/Tenveo-style UVC conference cam on
+        // pond-cam. Earlier aggressive defaults (deadzone 8% / lookahead 450ms
+        // / pan_speed_max 20) caused oscillation: velocity estimation is
+        // poisoned by camera motion itself, so long lookahead + fast speed
+        // kept overshooting past the subject. The conservative values below
+        // mostly eliminate that; override with env for tighter setups.
+        let deadzone = env_float("CLAWCAM_PTZ_DEADZONE_PCT", 15.0).clamp(0.0, 50.0) / 100.0;
+        let lookahead_ms = env_int("CLAWCAM_PTZ_LOOKAHEAD_MS", 150).clamp(0, 2000) as f32;
+        let pan_speed_min = env_int("CLAWCAM_PTZ_PAN_SPEED_MIN", 2).clamp(1, 24) as u8;
+        let pan_speed_max = env_int("CLAWCAM_PTZ_PAN_SPEED_MAX", 10).clamp(1, 24) as u8;
+        let tilt_speed_min = env_int("CLAWCAM_PTZ_TILT_SPEED_MIN", 2).clamp(1, 20) as u8;
+        let tilt_speed_max = env_int("CLAWCAM_PTZ_TILT_SPEED_MAX", 8).clamp(1, 20) as u8;
+        let drive_duration_ms = env_int("CLAWCAM_PTZ_DRIVE_MS", 500).clamp(200, 10_000) as u64;
         let refresh_interval =
             Duration::from_millis(env_int("CLAWCAM_PTZ_REFRESH_MS", 300).clamp(50, 10_000) as u64);
         let tick =
@@ -293,12 +299,14 @@ async fn steering_task(
             continue;
         }
 
-        // Predict where the target will be `lookahead_s` from now, using last
-        // bbox sample + velocity + time since sample. Offsets inference lag
-        // and motor latency. Clamp the extrapolation dt to avoid runaway if
-        // observations get stale (e.g. camera paused).
-        let dt_since_obs = obs.observed_at.elapsed().as_secs_f32().min(1.5);
-        let project = dt_since_obs + cfg.lookahead_s;
+        // Predict where the target will be `lookahead_s` from *now*. We project
+        // from the last observation through the intervening staleness plus the
+        // lookahead, but cap the total so a stale observation with a stale
+        // high velocity doesn't keep the predicted point racing away when the
+        // subject may have already slowed or stopped.
+        let dt_since_obs = obs.observed_at.elapsed().as_secs_f32();
+        let project_cap = cfg.lookahead_s + 0.4; // hard ceiling on extrapolation horizon
+        let project = (dt_since_obs + cfg.lookahead_s).min(project_cap).max(0.0);
         let predicted_cx = center.0 + obs.velocity.0 * project;
         let predicted_cy = center.1 + obs.velocity.1 * project;
 
@@ -343,6 +351,18 @@ async fn steering_task(
             continue;
         }
 
+        // Conference cams get confused by back-to-back opposing VISCA bursts
+        // (a right-burst landing on the serial bus while a left-burst is
+        // still auto-repeating gets interpreted as garbage). Before firing a
+        // direction change that reverses an axis, send an explicit stop so
+        // the motor quiesces and both requests hit the bus in a clean order.
+        let direction_reversed = current_motion != (0, 0)
+            && ((current_motion.0 != 0 && pan_dir != 0 && current_motion.0 != pan_dir)
+                || (current_motion.1 != 0 && tilt_dir != 0 && current_motion.1 != tilt_dir));
+        if direction_reversed {
+            let _ = cmd_tx.try_send(Command::Stop);
+        }
+
         let cmd = Command::Burst {
             pan: pan_dir,
             tilt: tilt_dir,
@@ -356,8 +376,9 @@ async fn steering_task(
         }
         if direction_changed {
             tracing::info!(
-                "ptz: dir change ox={:.2} oy={:.2} v=({:.0},{:.0}) → pan={} tilt={} (speeds {}/{})",
+                "ptz: dir change ox={:.2} oy={:.2} v=({:.0},{:.0}) → pan={} tilt={} (speeds {}/{}){}",
                 ox, oy, obs.velocity.0, obs.velocity.1, pan_dir, tilt_dir, pan_speed, tilt_speed,
+                if direction_reversed { " [reversed, sent stop]" } else { "" },
             );
         }
         current_motion = desired;
