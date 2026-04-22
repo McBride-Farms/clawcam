@@ -57,13 +57,44 @@ jobs:
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.tar.gz.sha256
 
-  # ARM cross-compile is currently broken because cross-rs's default gcc-9
-  # toolchain predates glibc 2.32 / libstdc++ C++17 symbols that the pyke/ort
-  # prebuilt aarch64 binary was compiled against (undefined reference to
-  # std::__throw_bad_array_new_length, __libc_single_threaded). The fix needs
-  # either a newer cross image or a move to zig cc; until then Pi devices
-  # build from source on-device via rustup + `cargo build --release`. See
-  # SKILL.md for the deploy procedure.
+  # Native arm64 build on the McBride-Farms self-hosted Pi runner. This
+  # avoids the cross-compile glibc/libstdc++ mismatch with the pyke/ort
+  # prebuilt aarch64 binary by compiling on the same toolchain that runs
+  # in production. Tag-push triggered only, so untrusted code can't run.
+  build-pi-arm64:
+    name: Build clawcam-pi-arm64
+    runs-on: [self-hosted, ARM64]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            pkg-config
+
+      - name: Build
+        # rustup-managed toolchain (installed on the runner during setup)
+        # rather than the dtolnay action — avoids re-downloading per run.
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --target aarch64-unknown-linux-gnu
+
+      - name: Package binary
+        run: |
+          cp target/aarch64-unknown-linux-gnu/release/clawcam clawcam-pi-arm64
+          chmod +x clawcam-pi-arm64
+          tar czf clawcam-pi-arm64.tar.gz clawcam-pi-arm64
+          sha256sum clawcam-pi-arm64.tar.gz > clawcam-pi-arm64.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: clawcam-pi-arm64
+          path: |
+            clawcam-pi-arm64.tar.gz
+            clawcam-pi-arm64.tar.gz.sha256
 
   model:
     name: Package YOLO model
@@ -90,7 +121,7 @@ jobs:
 
   release:
     name: Create release
-    needs: [build-native, model]
+    needs: [build-native, build-pi-arm64, model]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -130,4 +161,5 @@ jobs:
             | File | Description |
             |------|-------------|
             | `clawcam-linux-amd64` | Host CLI — Linux x86_64 |
+            | `clawcam-pi-arm64` | Device binary — Raspberry Pi 4/5 (64-bit) |
             | `yolov8n.onnx` | YOLOv8n detection model (COCO 80-class) |
