@@ -37,9 +37,9 @@ pub fn create_pipeline(
         .context(format!("failed to create {source_name}"))?;
 
     // For USB webcams (v4l2src), the sensor emits MJPEG — not the NV12 raw our
-    // capsfilter below demands — so we need jpegdec + videoconvert between the
-    // source and the NV12 capsfilter. libcamerasrc natively delivers NV12 and
-    // can skip these.
+    // capsfilter below demands — so we need v4l2jpegdec (HW decode via
+    // bcm2835-codec) + videoconvert between the source and the NV12 capsfilter.
+    // libcamerasrc natively delivers NV12 and can skip these.
     let needs_jpeg_decode = source_name == "v4l2src";
     let src_caps = if needs_jpeg_decode {
         Some(
@@ -58,7 +58,7 @@ pub fn create_pipeline(
         None
     };
     let jpegdec = if needs_jpeg_decode {
-        Some(gst::ElementFactory::make("jpegdec").build()?)
+        Some(gst::ElementFactory::make("v4l2jpegdec").build()?)
     } else {
         None
     };
@@ -68,13 +68,6 @@ pub fn create_pipeline(
         None
     };
 
-    // Only videoconvert+videoscale if libcamera can't deliver our target caps
-    // directly. For libcamerasrc + NV12 @ a supported sensor size, we can go
-    // straight into capsfilter → flip → tee and keep everything in NV12 DMABufs.
-    let flip_method = rotate_method(std::env::var("CLAWCAM_ROTATE").ok().as_deref());
-    let flip = gst::ElementFactory::make("videoflip")
-        .property_from_str("video-direction", flip_method)
-        .build()?;
     // IMPORTANT: format=NV12 + interlace-mode=progressive are required for
     // v4l2h264enc on Pi (bcm2835-codec) to negotiate correctly.
     let caps = gst::ElementFactory::make("capsfilter")
@@ -115,8 +108,7 @@ pub fn create_pipeline(
     let rgb_scale = gst::ElementFactory::make("videoscale").build()?;
     let rgb_convert = gst::ElementFactory::make("videoconvert").build()?;
 
-    let is_rot90 = matches!(flip_method, "90r" | "90l");
-    let (post_w, post_h) = if is_rot90 { (height, width) } else { (width, height) };
+    let (post_w, post_h) = (width, height);
     let yolo_scale_factor: u32 = std::env::var("CLAWCAM_YOLO_SCALE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -143,7 +135,7 @@ pub fn create_pipeline(
         .build();
 
     pipeline.add_many([
-        &source, &caps, &flip, &tee,
+        &source, &caps, &tee,
         &jpeg_queue, &jpegenc, jpeg_sink.upcast_ref(),
         &rgb_queue, &rgb_scale, &rgb_convert, &rgb_caps, rgb_sink.upcast_ref(),
     ])?;
@@ -152,9 +144,9 @@ pub fn create_pipeline(
     }
 
     if let (Some(c), Some(d), Some(v)) = (&src_caps, &jpegdec, &src_convert) {
-        gst::Element::link_many([&source, c, d, v, &caps, &flip, &tee])?;
+        gst::Element::link_many([&source, c, d, v, &caps, &tee])?;
     } else {
-        gst::Element::link_many([&source, &caps, &flip, &tee])?;
+        gst::Element::link_many([&source, &caps, &tee])?;
     }
 
     gst::Element::link_many([&jpeg_queue, &jpegenc, jpeg_sink.upcast_ref()])?;
@@ -245,23 +237,6 @@ fn build_stream_branch(pipeline: &gst::Pipeline, tee: &gst::Element, url: &str) 
     gst::Element::link_many([&queue, &encoder, &enc_caps, &parse, &rtsp_sink])?;
     tee.link_pads(None, &queue, None)?;
     Ok(())
-}
-
-/// Map CLAWCAM_ROTATE value → videoflip's video-direction enum.
-/// Accepts: "0","90","180","-90","270","cw","ccw","flip-h","flip-v","none" (case-insensitive)
-fn rotate_method(v: Option<&str>) -> &'static str {
-    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") | Some("0") | Some("none") | Some("identity") => "identity",
-        Some("90") | Some("cw") | Some("clockwise") => "90r",
-        Some("180") | Some("rotate-180") => "180",
-        Some("-90") | Some("270") | Some("ccw") | Some("counterclockwise") => "90l",
-        Some("flip-h") | Some("horizontal-flip") | Some("horiz") => "horiz",
-        Some("flip-v") | Some("vertical-flip") | Some("vert") => "vert",
-        Some(other) => {
-            tracing::warn!("CLAWCAM_ROTATE unrecognized value {other:?}, using identity");
-            "identity"
-        }
-    }
 }
 
 #[allow(dead_code)]
