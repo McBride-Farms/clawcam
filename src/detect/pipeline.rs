@@ -37,9 +37,11 @@ pub fn create_pipeline(
         .context(format!("failed to create {source_name}"))?;
 
     // For USB webcams (v4l2src), the sensor emits MJPEG — not the NV12 raw our
-    // capsfilter below demands — so we need v4l2jpegdec (HW decode via
-    // bcm2835-codec) + videoconvert between the source and the NV12 capsfilter.
-    // libcamerasrc natively delivers NV12 and can skip these.
+    // capsfilter below demands — so we need jpegdec + videoconvert between the
+    // source and the NV12 capsfilter. libcamerasrc natively delivers NV12 and
+    // can skip these. HW v4l2jpegdec would be lower-CPU but bcm2835-codec emits
+    // a spurious LAST_BUFFER after the JPEG header under this pipeline — every
+    // frame gets dropped. SW jpegdec is fine.
     let needs_jpeg_decode = source_name == "v4l2src";
     let src_caps = if needs_jpeg_decode {
         Some(
@@ -58,7 +60,7 @@ pub fn create_pipeline(
         None
     };
     let jpegdec = if needs_jpeg_decode {
-        Some(gst::ElementFactory::make("v4l2jpegdec").build()?)
+        Some(gst::ElementFactory::make("jpegdec").build()?)
     } else {
         None
     };

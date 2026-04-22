@@ -177,7 +177,7 @@ fn local_platform() -> Result<String> {
     let arch = std::env::consts::ARCH;
     match (os, arch) {
         ("linux", "x86_64") => Ok("linux-amd64".into()),
-        ("linux", "aarch64") => Ok("linux-arm64".into()),
+        ("linux", "aarch64") => Ok("pi-arm64".into()),
         ("linux", "arm") => Ok("linux-armv7".into()),
         ("macos", "aarch64") => Ok("darwin-arm64".into()),
         ("macos", "x86_64") => Ok("darwin-amd64".into()),
@@ -196,11 +196,13 @@ async fn remote_platform(dev: &Device) -> Result<String> {
         "darwin" => "darwin",
         _ => bail!("unsupported remote OS: {os_raw}"),
     };
-    let arch = match arch_raw.as_str() {
-        "x86_64" | "amd64" => "amd64",
-        "aarch64" | "arm64" => "arm64",
-        "armv7l" | "armv6l" => "armv7",
-        _ => bail!("unsupported remote arch: {arch_raw}"),
+    let platform = match (os, arch_raw.as_str()) {
+        ("linux", "x86_64") | ("linux", "amd64") => "linux-amd64",
+        ("linux", "aarch64") | ("linux", "arm64") => "pi-arm64",
+        ("linux", "armv7l") | ("linux", "armv6l") => "linux-armv7",
+        ("darwin", "x86_64") | ("darwin", "amd64") => "darwin-amd64",
+        ("darwin", "aarch64") | ("darwin", "arm64") => "darwin-arm64",
+        _ => bail!("unsupported remote platform: {os}-{arch_raw}"),
     };
-    Ok(format!("{os}-{arch}"))
+    Ok(platform.into())
 }
