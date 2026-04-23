@@ -627,7 +627,9 @@ fn fire_telemetry(
     });
 }
 
-/// Assemble JPEG frames into an MP4 clip using ffmpeg, return as base64.
+/// Assemble JPEG frames into an MP4 clip using GStreamer, return as base64.
+/// No external ffmpeg dependency — reuses the gst-plugins that are already
+/// present (x264enc + mp4mux + multifilesrc + h264parse).
 async fn assemble_clip(
     frames: &[TimestampedFrame],
     working_dir: &std::path::Path,
@@ -636,36 +638,67 @@ async fn assemble_clip(
         .or_else(|_| tempfile::tempdir())
         .context("failed to create temp dir")?;
 
-    // Write frames as numbered JPEGs
+    // Write frames as numbered JPEGs — multifilesrc ingests them in sequence.
     for (i, frame) in frames.iter().enumerate() {
         let path = tmp_dir.path().join(format!("frame_{i:04}.jpg"));
         std::fs::write(&path, &frame.jpeg)?;
     }
 
+    let frame_pattern = tmp_dir.path().join("frame_%04d.jpg");
     let clip_path = tmp_dir.path().join("clip.mp4");
+    let stop_index = frames.len().saturating_sub(1);
 
-    let output = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-framerate", "10",
-            "-i", &format!("{}/frame_%04d.jpg", tmp_dir.path().display()),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            clip_path.to_str().unwrap(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .context("failed to run ffmpeg — is it installed?")?;
+    let tmp_path = tmp_dir.path().to_path_buf();
+    let clip_path_for_thread = clip_path.clone();
+    // GStreamer's blocking bus wait doesn't play nicely with tokio's executor;
+    // run the whole pipeline on a dedicated blocking thread.
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use gstreamer as gst;
+        use gstreamer::prelude::*;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ffmpeg failed: {stderr}");
-    }
+        gst::init().ok();
+        let desc = format!(
+            "multifilesrc location=\"{}\" start-index=0 stop-index={} caps=image/jpeg,framerate=10/1 ! \
+             jpegdec ! videoconvert ! video/x-raw,format=I420 ! \
+             x264enc speed-preset=ultrafast tune=zerolatency bframes=0 key-int-max=30 ! \
+             h264parse config-interval=-1 ! mp4mux faststart=true ! \
+             filesink location=\"{}\"",
+            frame_pattern.display(),
+            stop_index,
+            clip_path_for_thread.display(),
+        );
+        let pipeline = gst::parse::launch(&desc).context("assemble_clip parse_launch")?;
+        pipeline.set_state(gst::State::Playing).context("assemble_clip start")?;
+
+        let bus = pipeline.bus().context("assemble_clip no bus")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let result = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break Err(anyhow::anyhow!("assemble_clip: GStreamer pipeline timed out"));
+            }
+            let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(remaining.as_millis() as u64))
+            else {
+                continue;
+            };
+            match msg.view() {
+                gst::MessageView::Eos(_) => break Ok(()),
+                gst::MessageView::Error(e) => {
+                    break Err(anyhow::anyhow!(
+                        "assemble_clip gstreamer error: {}",
+                        e.error()
+                    ));
+                }
+                _ => {}
+            }
+        };
+        let _ = pipeline.set_state(gst::State::Null);
+        result.map(|_| ())?;
+        let _ = tmp_path; // keep tempdir alive for the duration of the pipeline
+        Ok(())
+    })
+    .await
+    .context("assemble_clip join")??;
 
     let clip_bytes = tokio::fs::read(&clip_path).await?;
     Ok(b64(&clip_bytes))
