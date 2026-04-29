@@ -17,10 +17,20 @@
 
 use anyhow::Result;
 use std::io::Write as _;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 use tracing::{info, warn};
+
+/// Tracks the currently-running motion task (the duration loop that resends
+/// VISCA bytes after the initial drive command). Each new request aborts
+/// the prior task before issuing its own primary write — otherwise an
+/// explicit `stop` from the UI would be overridden by the running loop's
+/// next 80ms tick.
+type MotionGuard = Arc<Mutex<Option<AbortHandle>>>;
 
 pub async fn serve(bind: String, serial: String) -> Result<()> {
     // Configure serial port: 9600 8N1, raw.
@@ -39,6 +49,7 @@ pub async fn serve(bind: String, serial: String) -> Result<()> {
     info!("PTZ control endpoint listening on {bind} → {serial}");
 
     let token = std::env::var("CLAWCAM_PTZ_TOKEN").ok();
+    let motion: MotionGuard = Arc::new(Mutex::new(None));
 
     loop {
         let (sock, _addr) = match listener.accept().await {
@@ -50,15 +61,21 @@ pub async fn serve(bind: String, serial: String) -> Result<()> {
         };
         let serial = serial.clone();
         let token = token.clone();
+        let motion = motion.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(sock, &serial, token.as_deref()).await {
+            if let Err(e) = handle(sock, &serial, token.as_deref(), motion).await {
                 warn!("ptz handler: {e:#}");
             }
         });
     }
 }
 
-async fn handle(mut sock: TcpStream, serial: &str, token: Option<&str>) -> Result<()> {
+async fn handle(
+    mut sock: TcpStream,
+    serial: &str,
+    token: Option<&str>,
+    motion: MotionGuard,
+) -> Result<()> {
     let mut buf = vec![0u8; 8192];
     let mut total = 0usize;
     let (headers, body) = loop {
@@ -119,6 +136,18 @@ async fn handle(mut sock: TcpStream, serial: &str, token: Option<&str>) -> Resul
 
     let addr_byte = 0x80 | (cmd.address & 0x0F);
     let primary = build_visca(addr_byte, &cmd);
+
+    // Abort any in-flight motion task before we issue the new VISCA bytes.
+    // Without this, a previous "drive right" loop would still be re-sending
+    // its bytes every 80ms and would override our stop / new direction at
+    // its next tick.
+    {
+        let mut g = motion.lock().await;
+        if let Some(h) = g.take() {
+            h.abort();
+        }
+    }
+
     if let Err(e) = write_serial(serial, &primary) {
         let msg = format!(r#"{{"error":"serial write: {e}"}}"#);
         return respond(&mut sock, 502, &msg).await;
@@ -130,21 +159,35 @@ async fn handle(mut sock: TcpStream, serial: &str, token: Option<&str>) -> Resul
     // than continuous motion (as the VISCA spec describes), so a single
     // start + long sleep + stop produces only a tiny nudge. Repeating the
     // drive keeps the motor running for the full requested duration.
+    //
+    // The loop is spawned so we can respond 200 immediately — otherwise the
+    // browser fetch is held for the full duration_ms, making each click
+    // feel laggy (~390ms for the default 300ms burst, ~820ms at the 800ms
+    // burst the UI used previously).
     let has_motion = cmd.pan != 0 || cmd.tilt != 0 || cmd.zoom != 0;
     if has_motion && !cmd.home && !cmd.stop && cmd.duration_ms > 0 {
-        const REPEAT_INTERVAL_MS: u64 = 80;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(cmd.duration_ms);
-        loop {
-            tokio::time::sleep(Duration::from_millis(REPEAT_INTERVAL_MS)).await;
-            if tokio::time::Instant::now() >= deadline {
-                break;
+        let serial_owned = serial.to_string();
+        let primary_owned = primary.clone();
+        let pan_tilt = cmd.pan != 0 || cmd.tilt != 0;
+        let zoom = cmd.zoom != 0;
+        let duration = cmd.duration_ms;
+        let task = tokio::spawn(async move {
+            const REPEAT_INTERVAL_MS: u64 = 80;
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(duration);
+            loop {
+                tokio::time::sleep(Duration::from_millis(REPEAT_INTERVAL_MS)).await;
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                if write_serial(&serial_owned, &primary_owned).is_err() {
+                    break;
+                }
             }
-            if write_serial(serial, &primary).is_err() {
-                break;
-            }
-        }
-        let stop = stop_all_visca(addr_byte, cmd.pan != 0 || cmd.tilt != 0, cmd.zoom != 0);
-        let _ = write_serial(serial, &stop);
+            let stop = stop_all_visca(addr_byte, pan_tilt, zoom);
+            let _ = write_serial(&serial_owned, &stop);
+        });
+        let mut g = motion.lock().await;
+        *g = Some(task.abort_handle());
     }
 
     respond(&mut sock, 200, r#"{"ok":true}"#).await
