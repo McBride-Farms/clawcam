@@ -1,7 +1,52 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Serialize;
 use std::net::IpAddr;
 use std::time::Duration;
+
+/// One webhook destination. Multiple targets are sent to in parallel.
+#[derive(Debug, Clone)]
+pub struct WebhookTarget {
+    pub url: String,
+    pub token: Option<String>,
+}
+
+/// Pair a list of URLs with a list of tokens. Rules:
+/// - 0 URLs → error.
+/// - N URLs, 0 tokens → every target gets `None`.
+/// - N URLs, 1 token → that token is broadcast to every URL.
+/// - N URLs, N tokens → paired by index; an empty-string slot means `None`.
+/// - any other token count → error.
+pub fn parse_targets(urls: &[String], tokens: &[String]) -> Result<Vec<WebhookTarget>> {
+    if urls.is_empty() {
+        bail!("at least one webhook URL is required");
+    }
+    let mut targets = Vec::with_capacity(urls.len());
+    match tokens.len() {
+        0 => {
+            for u in urls {
+                targets.push(WebhookTarget { url: u.clone(), token: None });
+            }
+        }
+        1 => {
+            let shared = &tokens[0];
+            let token = if shared.is_empty() { None } else { Some(shared.clone()) };
+            for u in urls {
+                targets.push(WebhookTarget { url: u.clone(), token: token.clone() });
+            }
+        }
+        n if n == urls.len() => {
+            for (u, t) in urls.iter().zip(tokens.iter()) {
+                let token = if t.is_empty() { None } else { Some(t.clone()) };
+                targets.push(WebhookTarget { url: u.clone(), token });
+            }
+        }
+        n => bail!(
+            "webhook token count ({n}) must be 0, 1, or {} (one per --webhook)",
+            urls.len()
+        ),
+    }
+    Ok(targets)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Detection {
@@ -141,5 +186,59 @@ fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_urls_is_error() {
+        assert!(parse_targets(&[], &[]).is_err());
+    }
+
+    #[test]
+    fn no_tokens_means_all_none() {
+        let t = parse_targets(&s(&["a", "b"]), &[]).unwrap();
+        assert_eq!(t.len(), 2);
+        assert!(t.iter().all(|x| x.token.is_none()));
+    }
+
+    #[test]
+    fn single_token_broadcasts() {
+        let t = parse_targets(&s(&["a", "b", "c"]), &s(&["TOK"])).unwrap();
+        assert_eq!(t.len(), 3);
+        assert!(t.iter().all(|x| x.token.as_deref() == Some("TOK")));
+    }
+
+    #[test]
+    fn single_empty_token_broadcasts_none() {
+        let t = parse_targets(&s(&["a", "b"]), &s(&[""])).unwrap();
+        assert!(t.iter().all(|x| x.token.is_none()));
+    }
+
+    #[test]
+    fn paired_tokens() {
+        let t = parse_targets(&s(&["a", "b"]), &s(&["TA", "TB"])).unwrap();
+        assert_eq!(t[0].token.as_deref(), Some("TA"));
+        assert_eq!(t[1].token.as_deref(), Some("TB"));
+    }
+
+    #[test]
+    fn paired_empty_slot_means_none() {
+        let t = parse_targets(&s(&["a", "b"]), &s(&["TA", ""])).unwrap();
+        assert_eq!(t[0].token.as_deref(), Some("TA"));
+        assert!(t[1].token.is_none());
+    }
+
+    #[test]
+    fn mismatched_count_is_error() {
+        assert!(parse_targets(&s(&["a", "b", "c"]), &s(&["TA", "TB"])).is_err());
+        assert!(parse_targets(&s(&["a"]), &s(&["TA", "TB"])).is_err());
     }
 }

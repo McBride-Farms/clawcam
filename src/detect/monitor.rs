@@ -14,7 +14,7 @@ use crate::detect::pipeline;
 use crate::detect::ptz_track::PtzTracker;
 use crate::detect::tracker::ObjectTracker;
 use crate::detect::yolo::YoloDetector;
-use crate::webhook::{self, ClipPredSample, Detection, TrackInfo, WebhookPayload};
+use crate::webhook::{self, ClipPredSample, Detection, TrackInfo, WebhookPayload, WebhookTarget};
 
 // We don't videorate-throttle in GStreamer (negotiation is fragile), so this
 // is the effective YOLO inference cadence. Override with CLAWCAM_INFERENCE_INTERVAL_MS.
@@ -26,8 +26,8 @@ const MAX_CLIP_FRAMES: usize = 300; // ~30s cap
 const STATIONARY_THRESHOLD_PX: f32 = 5.0;
 
 pub async fn run_monitor(
-    webhook_url: Option<&str>,
-    webhook_token: Option<&str>,
+    webhook_urls: &[String],
+    webhook_tokens: &[String],
     host: Option<&str>,
     log_path: Option<&str>,
 ) -> Result<()> {
@@ -43,18 +43,38 @@ pub async fn run_monitor(
             .try_init();
     }
 
-    let webhook_url_owned = match webhook_url {
-        Some(u) => u.to_string(),
-        None => std::env::var("CLAWCAM_WEBHOOK")
-            .context("no webhook URL — pass --webhook or set CLAWCAM_WEBHOOK")?,
+    // Collect URLs from the CLI flags or, if none were passed, fall back to
+    // the comma-separated CLAWCAM_WEBHOOK env var (set by setup.rs into the
+    // systemd EnvironmentFile). Empty URL slots are dropped; empty token
+    // slots are kept and mean "no token for this slot".
+    let urls_owned: Vec<String> = if !webhook_urls.is_empty() {
+        webhook_urls.to_vec()
+    } else {
+        let raw = std::env::var("CLAWCAM_WEBHOOK")
+            .context("no webhook URL — pass --webhook or set CLAWCAM_WEBHOOK")?;
+        raw.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     };
-    let webhook_url = webhook_url_owned.as_str();
-
-    let webhook_token_owned = match webhook_token {
-        Some(t) => Some(t.to_string()),
-        None => std::env::var("CLAWCAM_WEBHOOK_TOKEN").ok(),
+    let tokens_owned: Vec<String> = if !webhook_tokens.is_empty() {
+        webhook_tokens.to_vec()
+    } else {
+        std::env::var("CLAWCAM_WEBHOOK_TOKEN")
+            .ok()
+            .map(|raw| raw.split(',').map(|s| s.to_string()).collect())
+            .unwrap_or_default()
     };
-    let webhook_token: Option<&str> = webhook_token_owned.as_deref();
+    let webhook_targets = webhook::parse_targets(&urls_owned, &tokens_owned)?;
+    info!(
+        "webhook targets ({}): {}",
+        webhook_targets.len(),
+        webhook_targets
+            .iter()
+            .map(|t| t.url.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     let camera_source =
         std::env::var("CLAWCAM_CAMERA_SOURCE").unwrap_or_else(|_| "v4l2src".to_string());
@@ -211,7 +231,11 @@ pub async fn run_monitor(
     }
 
     let telemetry_url = std::env::var("CLAWCAM_TELEMETRY_URL").ok();
-    let telemetry_token = webhook_token_owned.clone();
+    // Telemetry is a single endpoint; reuse the first webhook's token for
+    // bearer auth (telemetry historically rode on the same shared token).
+    let telemetry_token = webhook_targets
+        .first()
+        .and_then(|t| t.token.clone());
 
     // Adaptive monitoring components
     let mut frame_buffer = FrameBuffer::new(FRAME_BUFFER_CAPACITY);
@@ -359,8 +383,7 @@ pub async fn run_monitor(
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             fire_webhook(
-                webhook_url,
-                webhook_token,
+                &webhook_targets,
                 &hostname,
                 &detections,
                 &jpeg,
@@ -411,8 +434,7 @@ pub async fn run_monitor(
                 info!("event {eid}: initial alert — {summary}");
 
                 fire_webhook(
-                    webhook_url,
-                    webhook_token,
+                    &webhook_targets,
                     &hostname,
                     &detections,
                     &jpeg,
@@ -438,8 +460,7 @@ pub async fn run_monitor(
                     info!("event {eid}: update ({detail}) — {summary}");
 
                     fire_webhook(
-                        webhook_url,
-                        webhook_token,
+                        &webhook_targets,
                         &hostname,
                         &detections,
                         &jpeg,
@@ -484,8 +505,7 @@ pub async fn run_monitor(
                     let last_tracks = tracker.active_tracks().to_vec();
 
                     fire_webhook(
-                        webhook_url,
-                        webhook_token,
+                        &webhook_targets,
                         &hostname,
                         &detections,
                         &jpeg,
@@ -561,15 +581,34 @@ pub async fn run_monitor(
             clip_predictions: Some(std::mem::take(&mut clip_preds)),
         };
 
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            webhook::send(webhook_url, webhook_token, &payload),
-        )
-        .await
-        {
-            Ok(Ok(())) => info!("shutdown end webhook delivered for {eid}"),
-            Ok(Err(e)) => warn!("shutdown end webhook failed: {e}"),
-            Err(_) => warn!("shutdown end webhook timed out after 10s"),
+        // Fan out to every configured target under one shared 10s budget.
+        // The shutdown path can't afford to wait per-target since systemd is
+        // already counting down to SIGKILL.
+        let payload_arc = std::sync::Arc::new(payload);
+        let mut set = tokio::task::JoinSet::new();
+        for t in &webhook_targets {
+            let url = t.url.clone();
+            let token = t.token.clone();
+            let payload = payload_arc.clone();
+            set.spawn(async move {
+                let res = webhook::send(&url, token.as_deref(), &payload).await;
+                (url, res)
+            });
+        }
+        let drain = async {
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok((url, Ok(()))) => info!("shutdown end webhook delivered for {eid} → {url}"),
+                    Ok((url, Err(e))) => warn!("shutdown end webhook failed for {url}: {e}"),
+                    Err(e) => warn!("shutdown end webhook task panicked: {e}"),
+                }
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(10), drain).await.is_err() {
+            warn!(
+                "shutdown end webhook timed out after 10s ({} targets)",
+                webhook_targets.len()
+            );
         }
     }
 
@@ -618,8 +657,7 @@ fn build_track_info(
 
 #[allow(clippy::too_many_arguments)]
 fn fire_webhook(
-    webhook_url: &str,
-    webhook_token: Option<&str>,
+    targets: &[WebhookTarget],
     hostname: &str,
     detections: &[Detection],
     jpeg: &[u8],
@@ -651,13 +689,19 @@ fn fire_webhook(
         clip_predictions,
     };
 
-    let url = webhook_url.to_string();
-    let token = webhook_token.map(String::from);
-    tokio::spawn(async move {
-        if let Err(e) = webhook::send(&url, token.as_deref(), &payload).await {
-            warn!("webhook send failed: {e}");
-        }
-    });
+    // Payloads carry base64 JPEGs (and sometimes a clip), so share by Arc
+    // rather than cloning per target.
+    let payload = std::sync::Arc::new(payload);
+    for t in targets {
+        let url = t.url.clone();
+        let token = t.token.clone();
+        let payload = payload.clone();
+        tokio::spawn(async move {
+            if let Err(e) = webhook::send(&url, token.as_deref(), &payload).await {
+                warn!("webhook send failed for {url}: {e}");
+            }
+        });
+    }
 }
 
 fn fire_telemetry(

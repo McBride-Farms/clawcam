@@ -98,8 +98,13 @@ clawcam device add barn-cam 192.168.1.50
 
 # Deploy monitor with webhook — Pi pushes events directly
 clawcam setup barn-cam \
-  --webhook http://your-host:8080/hooks/clawcam \
+  --webhook https://your-host/hooks/clawcam \
   --webhook-token YOUR_TOKEN
+
+# Fan out to multiple receivers — repeat the flag
+clawcam setup barn-cam \
+  --webhook https://primary/hooks/clawcam     --webhook-token TOK_A \
+  --webhook https://secondary/hooks/clawcam   --webhook-token TOK_B
 ```
 
 That's it. The Pi will POST detection events with a 1080p snapshot and YOLO predictions to your endpoint.
@@ -208,8 +213,8 @@ setup complete — clawcam is active on barn-cam
 ```
 
 Flags:
-- `--webhook URL` — Pi POSTs events directly to this URL
-- `--webhook-token TOKEN` — Bearer token for webhook auth
+- `--webhook URL` — Pi POSTs events directly to this URL. Repeat the flag to fan out to multiple receivers.
+- `--webhook-token TOKEN` — Bearer token for webhook auth. Repeat to pair 1:1 with `--webhook`, or pass once to broadcast to every URL. Use `""` to skip a slot.
 - `--user` — SSH user (default: pi)
 
 ### `snap NAME` / `clip NAME`

@@ -13,9 +13,11 @@ const GITHUB_REPO: &str = "grunt3714-lgtm/clawcam";
 pub async fn run_setup(
     dev: &Device,
     user: &str,
-    webhook: &str,
-    webhook_token: Option<&str>,
+    webhooks: &[String],
+    webhook_tokens: &[String],
 ) -> Result<()> {
+    // Validate pairing up front; the same rules the monitor will apply.
+    crate::webhook::parse_targets(webhooks, webhook_tokens)?;
     info!("setting up {} ({})", dev.name, dev.host);
 
     // 1. Install system dependencies (runtime only — no -dev packages needed on device)
@@ -87,14 +89,18 @@ pub async fn run_setup(
     info!("creating systemd service...");
 
     // Write secrets to an environment file with restricted permissions (0600)
-    // so the webhook token never appears in the service unit or process list.
+    // so the webhook tokens never appear in the service unit or process list.
+    // Multiple webhooks/tokens are joined with commas; the monitor splits on
+    // commas. URLs and base64/hex tokens don't contain commas in practice.
+    let webhook_joined = webhooks.join(",");
     let mut env_contents = format!(
-        "CLAWCAM_WEBHOOK={webhook}\n\
+        "CLAWCAM_WEBHOOK={webhook_joined}\n\
          CLAWCAM_CAMERA_SOURCE={cam_source}\n\
          CLAWCAM_MODEL_PATH={REMOTE_MODEL}\n"
     );
-    if let Some(token) = webhook_token {
-        env_contents.push_str(&format!("CLAWCAM_WEBHOOK_TOKEN={token}\n"));
+    if !webhook_tokens.is_empty() {
+        let tokens_joined = webhook_tokens.join(",");
+        env_contents.push_str(&format!("CLAWCAM_WEBHOOK_TOKEN={tokens_joined}\n"));
     }
 
     let tmp_env = "/tmp/clawcam_env_tmp";

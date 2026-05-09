@@ -40,9 +40,21 @@ clawcam device remove barn-cam
 Deploy the on-device monitor that pushes detection events directly to your endpoint.
 ```bash
 clawcam setup barn-cam \
-  --webhook http://your-host:8080/hooks/clawcam \
+  --webhook https://your-host/hooks/clawcam \
   --webhook-token YOUR_TOKEN
 ```
+
+To fan events out to multiple receivers, repeat `--webhook` (and `--webhook-token` if they need different tokens):
+```bash
+clawcam setup barn-cam \
+  --webhook https://primary/hooks/clawcam     --webhook-token TOK_A \
+  --webhook https://secondary/hooks/clawcam   --webhook-token TOK_B
+```
+
+Token pairing rules:
+- 0 tokens → no auth on any target.
+- 1 token → broadcast to every URL.
+- N tokens → paired 1:1 with N URLs (use `""` to skip a slot).
 
 Setup auto-detects the connected camera (libcamera or V4L2), installs GStreamer and dependencies, uploads the binary and YOLO model, and creates a systemd service for boot persistence.
 

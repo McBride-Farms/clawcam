@@ -22,12 +22,15 @@ pub enum Command {
     Setup {
         /// Device name from registry
         name: String,
-        /// Webhook URL for detection events
+        /// Webhook URL for detection events. Repeat the flag to fan events
+        /// out to multiple receivers.
+        #[arg(long, required = true)]
+        webhook: Vec<String>,
+        /// Bearer token for webhook auth. Repeat to pair 1:1 with --webhook
+        /// (positional). Pass once to broadcast the same token to every URL.
+        /// Use an empty string ("") to skip the token for a particular slot.
         #[arg(long)]
-        webhook: String,
-        /// Bearer token for webhook auth
-        #[arg(long)]
-        webhook_token: Option<String>,
+        webhook_token: Vec<String>,
         /// SSH user (default: pi)
         #[arg(long, default_value = "pi")]
         user: String,
@@ -139,12 +142,14 @@ pub enum Command {
 
     /// Run the on-device detection monitor (not for direct use)
     Monitor {
-        /// Webhook URL (or set CLAWCAM_WEBHOOK env var)
+        /// Webhook URL (repeat for multiple, or set CLAWCAM_WEBHOOK to a
+        /// comma-separated list).
         #[arg(long)]
-        webhook: Option<String>,
-        /// Bearer token for webhook auth
+        webhook: Vec<String>,
+        /// Bearer token for webhook auth (repeat to pair 1:1 with --webhook,
+        /// or set CLAWCAM_WEBHOOK_TOKEN to a comma-separated list).
         #[arg(long)]
-        webhook_token: Option<String>,
+        webhook_token: Vec<String>,
         /// Device hostname for event payloads
         #[arg(long)]
         host: Option<String>,
@@ -208,7 +213,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Setup { name, webhook, webhook_token, user } => {
             let registry = DeviceRegistry::load()?;
             let dev = registry.get(&name)?;
-            crate::ssh::setup::run_setup(&dev, &user, &webhook, webhook_token.as_deref()).await
+            // Validate the URL/token pairing here so we fail fast with a clear
+            // error before any SSH work runs.
+            crate::webhook::parse_targets(&webhook, &webhook_token)?;
+            crate::ssh::setup::run_setup(&dev, &user, &webhook, &webhook_token).await
         }
         Command::Status { name, json } => {
             let registry = DeviceRegistry::load()?;
@@ -275,7 +283,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             crate::media::clip::run_clip_local(dur, &out)
         }
         Command::Monitor { webhook, webhook_token, host, log_path } => {
-            crate::detect::monitor::run_monitor(webhook.as_deref(), webhook_token.as_deref(), host.as_deref(), log_path.as_deref()).await
+            crate::detect::monitor::run_monitor(&webhook, &webhook_token, host.as_deref(), log_path.as_deref()).await
         }
     }
 }
