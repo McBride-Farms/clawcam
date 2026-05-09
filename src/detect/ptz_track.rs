@@ -106,6 +106,13 @@ struct SteeringConfig {
     refresh_interval: Duration,
     /// How often the steering task evaluates and potentially updates the motor.
     tick: Duration,
+    /// Tracker-only sign flips. Distinct from the server-side `CLAWCAM_PTZ_*_INVERT`
+    /// env vars: those flip every client (web UI, CLI, tracker) and are meant for
+    /// physical mount inversions. These flip only the auto-tracker, for cases where
+    /// the image is mirrored relative to motor direction (so target-on-right means
+    /// the camera should physically pan left to bring it to center).
+    pan_invert: bool,
+    tilt_invert: bool,
 }
 
 impl PtzTracker {
@@ -139,12 +146,16 @@ impl PtzTracker {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|s| *s > 0)
             .map(Duration::from_secs);
+        let pan_invert = std::env::var("CLAWCAM_PTZ_TRACK_PAN_INVERT").ok().as_deref() == Some("1");
+        let tilt_invert =
+            std::env::var("CLAWCAM_PTZ_TRACK_TILT_INVERT").ok().as_deref() == Some("1");
 
         info!(
             "PTZ tracking enabled (VISCA via {endpoint}): \
              deadzone={:.0}% lookahead={lookahead_ms:.0}ms \
              pan_speed=[{pan_speed_min},{pan_speed_max}] tilt_speed=[{tilt_speed_min},{tilt_speed_max}] \
-             drive={drive_duration_ms}ms refresh={}ms tick={}ms",
+             drive={drive_duration_ms}ms refresh={}ms tick={}ms \
+             pan_invert={pan_invert} tilt_invert={tilt_invert}",
             deadzone * 100.0,
             refresh_interval.as_millis(),
             tick.as_millis(),
@@ -169,6 +180,8 @@ impl PtzTracker {
             drive_duration_ms,
             refresh_interval,
             tick,
+            pan_invert,
+            tilt_invert,
         };
 
         let (obs_tx, obs_rx) = watch::channel(Observation::default());
@@ -325,9 +338,16 @@ async fn steering_task(
 
         // Direction bytes: VISCA server uses +pan = right, +tilt = up.
         // Image y grows downward → tilt = -oy.signum. Installation-level
-        // mount flips (upside-down) are applied inside the VISCA server.
-        let pan_dir = if pan_active { ox.signum() as i32 } else { 0 };
-        let tilt_dir = if tilt_active { -oy.signum() as i32 } else { 0 };
+        // mount flips (upside-down) are applied inside the VISCA server;
+        // tracker-only flips (mirrored image vs motor) are applied here.
+        let mut pan_dir = if pan_active { ox.signum() as i32 } else { 0 };
+        let mut tilt_dir = if tilt_active { -oy.signum() as i32 } else { 0 };
+        if cfg.pan_invert {
+            pan_dir = -pan_dir;
+        }
+        if cfg.tilt_invert {
+            tilt_dir = -tilt_dir;
+        }
 
         // P-controller: speed scales linearly with |offset|, bottoming out at
         // min_speed just past the deadzone and capping at max_speed at the edge.
