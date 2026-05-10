@@ -34,6 +34,11 @@ pub enum Command {
         /// SSH user (default: pi)
         #[arg(long, default_value = "pi")]
         user: String,
+        /// Skip the YOLO model upload if the device already has one. Use
+        /// this on redeploys to preserve a custom-tuned model (e.g. one
+        /// exported at a non-default imgsz to fit a Pi 4's CPU budget).
+        #[arg(long)]
+        keep_model: bool,
     },
 
     /// Check device status
@@ -210,13 +215,13 @@ pub enum DeviceAction {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Device { action } => run_device(action).await,
-        Command::Setup { name, webhook, webhook_token, user } => {
+        Command::Setup { name, webhook, webhook_token, user, keep_model } => {
             let registry = DeviceRegistry::load()?;
             let dev = registry.get(&name)?;
             // Validate the URL/token pairing here so we fail fast with a clear
             // error before any SSH work runs.
             crate::webhook::parse_targets(&webhook, &webhook_token)?;
-            crate::ssh::setup::run_setup(&dev, &user, &webhook, &webhook_token).await
+            crate::ssh::setup::run_setup(&dev, &user, &webhook, &webhook_token, keep_model).await
         }
         Command::Status { name, json } => {
             let registry = DeviceRegistry::load()?;

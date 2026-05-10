@@ -15,6 +15,7 @@ pub async fn run_setup(
     user: &str,
     webhooks: &[String],
     webhook_tokens: &[String],
+    keep_model: bool,
 ) -> Result<()> {
     // Validate pairing up front; the same rules the monitor will apply.
     crate::webhook::parse_targets(webhooks, webhook_tokens)?;
@@ -64,22 +65,36 @@ pub async fn run_setup(
         "sudo mv /tmp/clawcam {REMOTE_BIN} && sudo chmod +x {REMOTE_BIN}"
     )).await?;
 
-    // 4. Deploy YOLO model
-    info!("deploying YOLO model...");
-    let local_model = find_model();
-    match local_model {
-        Some(path) => {
-            info!("uploading local model from {}", path.display());
-            session::scp_to(dev, &path.to_string_lossy(), "/tmp/yolov8n.onnx").await?;
+    // 4. Deploy YOLO model. With --keep-model, preserve whatever model is
+    // already on the device (e.g. a custom-imgsz export tuned to that
+    // device's CPU budget); otherwise overwrite with the host's model.
+    let remote_model_exists = session::run_cmd(
+        dev,
+        &format!("test -s {REMOTE_MODEL} && echo present || echo missing"),
+    )
+    .await
+    .map(|s| s.trim() == "present")
+    .unwrap_or(false);
+
+    if keep_model && remote_model_exists {
+        info!("--keep-model: preserving existing model at {REMOTE_MODEL}");
+    } else {
+        info!("deploying YOLO model...");
+        let local_model = find_model();
+        match local_model {
+            Some(path) => {
+                info!("uploading local model from {}", path.display());
+                session::scp_to(dev, &path.to_string_lossy(), "/tmp/yolov8n.onnx").await?;
+            }
+            None => {
+                info!("no local model found, downloading from GitHub release...");
+                download_model_to_device(dev).await?;
+            }
         }
-        None => {
-            info!("no local model found, downloading from GitHub release...");
-            download_model_to_device(dev).await?;
-        }
+        session::run_cmd(dev, &format!(
+            "sudo mv /tmp/yolov8n.onnx {REMOTE_MODEL}"
+        )).await?;
     }
-    session::run_cmd(dev, &format!(
-        "sudo mv /tmp/yolov8n.onnx {REMOTE_MODEL}"
-    )).await?;
 
     // 5. Verify deployment
     let version = session::run_cmd(dev, &format!("{REMOTE_BIN} --version")).await?;
@@ -101,6 +116,16 @@ pub async fn run_setup(
     if !webhook_tokens.is_empty() {
         let tokens_joined = webhook_tokens.join(",");
         env_contents.push_str(&format!("CLAWCAM_WEBHOOK_TOKEN={tokens_joined}\n"));
+    }
+
+    // Pi-class hardware (Pi 4 / Pi 3B+ / Zero 2) needs a slower inference
+    // cadence than the binary's stock 100ms — at 100ms, ONNX (4 threads)
+    // saturates all cores back-to-back and the device thermally throttles.
+    // 500ms drops process CPU ~30% and clears thermal headroom for the
+    // hardware H.264 encoder + 1080p capture. x86 hosts can keep the
+    // tighter default since their inference completes in <50ms anyway.
+    if matches!(arch, "aarch64" | "armv7l" | "armv6l") {
+        env_contents.push_str("CLAWCAM_INFERENCE_INTERVAL_MS=500\n");
     }
 
     let tmp_env = "/tmp/clawcam_env_tmp";

@@ -57,15 +57,25 @@ impl YoloDetector {
             .filter(|v| *v >= 160)
             .unwrap_or(DEFAULT_INPUT_SIZE);
 
+        // Cap ONNX intra-op parallelism. Defaults to 4 (saturate Pi 4),
+        // but Pi 4 inference at full 4 cores leaves no headroom for the
+        // rest of the pipeline (decode + JPEG re-encode); set this to 2
+        // to give the camera/encoder threads room to breathe.
+        let intra_threads = std::env::var("CLAWCAM_YOLO_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0 && *n <= 16)
+            .unwrap_or(4);
+
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?
-            .with_intra_threads(4)
+            .with_intra_threads(intra_threads)
             .map_err(|e| anyhow::anyhow!("failed to set threads: {e}"))?
             .commit_from_file(model_path)
             .map_err(|e| anyhow::anyhow!("failed to load model from {model_path}: {e}"))?;
 
         tracing::info!(
-            "confidence threshold: {conf_threshold}; input: {input_size}×{input_size}; class allowlist: {}",
+            "confidence threshold: {conf_threshold}; input: {input_size}×{input_size}; threads: {intra_threads}; class allowlist: {}",
             class_allow
                 .as_ref()
                 .map(|s| s.iter().cloned().collect::<Vec<_>>().join(","))
