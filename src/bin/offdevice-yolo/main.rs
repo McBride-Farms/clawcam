@@ -159,6 +159,14 @@ async fn main() -> Result<()> {
     let frame_timeout = Duration::from_secs(args.frame_timeout_s.max(5));
     let host = args.camname.clone();
     let pipeline = stream.pipeline.clone();
+
+    // Rolling inference timing, matches the Pi-side monitor.rs pattern so
+    // operators can compare numbers across the two binaries.
+    const INFER_LOG_EVERY: u32 = 40;
+    let mut infer_ms_sum: u128 = 0;
+    let mut infer_count: u32 = 0;
+    let mut window_start = Instant::now();
+
     loop {
         let frame: Frame = match stream.frames.recv_timeout(frame_timeout) {
             Ok(f) => f,
@@ -172,6 +180,7 @@ async fn main() -> Result<()> {
             }
         };
 
+        let infer_start = Instant::now();
         let detections = match detector.detect(&frame.data, frame.width, frame.height) {
             Ok(d) => d,
             Err(e) => {
@@ -179,6 +188,20 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
+        infer_ms_sum += infer_start.elapsed().as_millis();
+        infer_count += 1;
+        if infer_count >= INFER_LOG_EVERY {
+            let avg_ms = infer_ms_sum as f64 / infer_count as f64;
+            let window_secs = window_start.elapsed().as_secs_f64().max(0.001);
+            let effective_fps = infer_count as f64 / window_secs;
+            info!(
+                "inference: avg {:.1} ms over last {} frames ({:.1} FPS effective)",
+                avg_ms, infer_count, effective_fps
+            );
+            infer_ms_sum = 0;
+            infer_count = 0;
+            window_start = Instant::now();
+        }
 
         let emit = lifecycle.step(&detections, Instant::now());
         match emit {
