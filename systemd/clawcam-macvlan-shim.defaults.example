@@ -1,0 +1,19 @@
+# Drop to /etc/default/clawcam-macvlan-shim, then:
+#   systemctl daemon-reload
+#   systemctl enable --now clawcam-macvlan-shim.service
+
+# Name of the macvlan shim interface this unit creates.
+SHIM_IF=mvlanshim
+
+# Parent interface — the same one the Docker macvlan network is attached
+# to. Find with `docker network inspect <macvlan-net> | grep parent`.
+PARENT_IF=eno1
+
+# Shim's own address. Pick an unused LAN IP, /32 mask so it does not
+# fight the parent interface for the /24.
+SHIM_ADDR=192.168.1.200/32
+
+# Space-separated list of macvlan container IPs the host needs to reach
+# (typically the mediamtx container and the webhook-receiver container).
+# A /32 route is added for each, all via the shim interface.
+TARGET_IPS=192.168.1.31 192.168.1.26

@@ -1,0 +1,19 @@
+[Unit]
+Description=clawcam off-device YOLO worker for camera %i
+Documentation=https://github.com/McBride-Farms/clawcam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/clawcam-offdevice/%i.env
+# The unit's instance name is the camera name (e.g. pond-cam) and is
+# passed as --camname so the resulting webhook payloads use it as `host`,
+# matching what the Pi-side monitor for that camera would send.
+ExecStart=/usr/local/bin/offdevice-yolo --camname %i
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target
