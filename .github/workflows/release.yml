@@ -13,7 +13,7 @@ env:
 
 jobs:
   build-native:
-    name: Build ${{ matrix.artifact }}
+    name: Build ${{ matrix.suffix }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -21,7 +21,7 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: clawcam-linux-amd64
+            suffix: linux-amd64
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -39,23 +39,26 @@ jobs:
             pkg-config
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --bins
 
-      - name: Package binary
+      - name: Package binaries
         run: |
-          cp target/${{ matrix.target }}/release/clawcam ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
-          tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
-          sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256 2>/dev/null || \
-            shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+          for bin in clawcam offdevice-yolo; do
+            out="${bin}-${{ matrix.suffix }}"
+            cp target/${{ matrix.target }}/release/${bin} "${out}"
+            chmod +x "${out}"
+            tar czf "${out}.tar.gz" "${out}"
+            sha256sum "${out}.tar.gz" > "${out}.tar.gz.sha256" 2>/dev/null || \
+              shasum -a 256 "${out}.tar.gz" > "${out}.tar.gz.sha256"
+          done
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ matrix.suffix }}
           path: |
-            ${{ matrix.artifact }}.tar.gz
-            ${{ matrix.artifact }}.tar.gz.sha256
+            *-${{ matrix.suffix }}.tar.gz
+            *-${{ matrix.suffix }}.tar.gz.sha256
 
   # Native arm64 build on the McBride-Farms self-hosted Pi runner. This
   # avoids the cross-compile glibc/libstdc++ mismatch with the pyke/ort
@@ -79,22 +82,25 @@ jobs:
         # rather than the dtolnay action — avoids re-downloading per run.
         run: |
           . "$HOME/.cargo/env"
-          cargo build --release --target aarch64-unknown-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu --bins
 
-      - name: Package binary
+      - name: Package binaries
         run: |
-          cp target/aarch64-unknown-linux-gnu/release/clawcam clawcam-pi-arm64
-          chmod +x clawcam-pi-arm64
-          tar czf clawcam-pi-arm64.tar.gz clawcam-pi-arm64
-          sha256sum clawcam-pi-arm64.tar.gz > clawcam-pi-arm64.tar.gz.sha256
+          for bin in clawcam offdevice-yolo; do
+            out="${bin}-pi-arm64"
+            cp target/aarch64-unknown-linux-gnu/release/${bin} "${out}"
+            chmod +x "${out}"
+            tar czf "${out}.tar.gz" "${out}"
+            sha256sum "${out}.tar.gz" > "${out}.tar.gz.sha256"
+          done
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: clawcam-pi-arm64
+          name: pi-arm64
           path: |
-            clawcam-pi-arm64.tar.gz
-            clawcam-pi-arm64.tar.gz.sha256
+            *-pi-arm64.tar.gz
+            *-pi-arm64.tar.gz.sha256
 
   model:
     name: Package YOLO model
@@ -160,6 +166,8 @@ jobs:
 
             | File | Description |
             |------|-------------|
-            | `clawcam-linux-amd64` | Host CLI — Linux x86_64 |
-            | `clawcam-pi-arm64` | Device binary — Raspberry Pi 4/5 (64-bit) |
+            | `clawcam-linux-amd64` | Pi-side monitor — Linux x86_64 (host CLI / dev) |
+            | `clawcam-pi-arm64` | Pi-side monitor — Raspberry Pi 4/5 (64-bit) |
+            | `offdevice-yolo-linux-amd64` | Off-device YOLO worker — Linux x86_64 |
+            | `offdevice-yolo-pi-arm64` | Off-device YOLO worker — Raspberry Pi 4/5 (64-bit) |
             | `yolov8n.onnx` | YOLOv8n detection model (COCO 80-class) |
