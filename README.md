@@ -305,6 +305,111 @@ Full 80-class COCO set. Most relevant for monitoring:
 | `/etc/clawcam.env` | Secrets (webhook token, mode 0600) |
 | `/var/log/clawcam.log` | Monitor log |
 
+## Off-device YOLO (optional)
+
+The same crate ships a second binary, `offdevice-yolo`, that pulls a
+camera's RTSP feed **from mediamtx** (not from the camera directly)
+and posts detections to the same webhook the Pi-side monitor uses. It
+is opt-in — deployers who don't want it can build with
+`cargo build --release --bin clawcam` and skip the second binary.
+
+**Why it exists**
+
+- Second opinion at a lower confidence floor, without burning Pi 4 thermals.
+- Run YOLO for cameras whose host can't afford on-device inference at all.
+- Headroom to swap in `yolov8s` / `yolov8m` weights (no Pi thermal ceiling).
+
+**Architecture** — the worker is just another mediamtx consumer:
+
+```
+camera ──RTSP push──► mediamtx ─┬─► browsers (HLS) / Android (WHEP)
+                                └─► offdevice-yolo ──► /hooks/clawcam
+```
+
+It **does not** re-publish the stream; mediamtx already does. See
+`src/bin/offdevice-yolo/` for the implementation. The `webhook` and
+`detect::yolo` modules are shared with the Pi binary via `#[path]`
+imports so the wire format and detection semantics can't drift.
+
+**Same-host macvlan note** — when the worker shares a physical host with
+a macvlan-attached mediamtx (or with the webhook-receiver container), the
+Linux kernel blocks host↔macvlan-child traffic by default. Install the
+shim unit first:
+
+```
+sudo install -m 644 systemd/clawcam-macvlan-shim.service /etc/systemd/system/
+sudo cp systemd/clawcam-macvlan-shim.defaults.example /etc/default/clawcam-macvlan-shim
+# edit /etc/default/clawcam-macvlan-shim to set SHIM_IF / PARENT_IF /
+# SHIM_ADDR / TARGET_IPS for your topology
+sudo systemctl daemon-reload
+sudo systemctl enable --now clawcam-macvlan-shim.service
+```
+
+If the worker runs on a different host from mediamtx, skip the shim —
+the kernel restriction doesn't apply across machines.
+
+**Deploy** — one systemd instance per camera:
+
+```
+sudo install -m 755 target/release/offdevice-yolo /usr/local/bin/
+sudo mkdir -p /etc/clawcam-offdevice /var/lib/clawcam-offdevice
+sudo cp models/yolov8n.onnx /var/lib/clawcam-offdevice/    # or yolov8s.onnx
+sudo cp systemd/clawcam-offdevice-yolo@.service /etc/systemd/system/
+sudo cp systemd/camera.env.example /etc/clawcam-offdevice/<camera>.env
+# edit /etc/clawcam-offdevice/<camera>.env to set RTSP / webhook / model
+sudo systemctl daemon-reload
+sudo systemctl enable --now clawcam-offdevice-yolo@<camera>
+```
+
+For automatic lifecycle, register the unit with mediamtx's `runOnReady`
+hook so the worker only runs while a camera is actually publishing:
+
+```yaml
+# mediamtx.yml
+paths:
+  <camera>:
+    runOnReady: systemctl start clawcam-offdevice-yolo@$MTX_PATH
+    runOnNotReady: systemctl stop clawcam-offdevice-yolo@$MTX_PATH
+```
+
+**Webhook payload** — identical to the Pi-side `WebhookPayload`. The
+only fields that differ are `source: "clawcam-offdevice"` and
+`detail: "off_device"`. `host` is the camera name (passed via
+`--camname` or the systemd instance), so events route to the same
+camera the Pi-side monitor would.
+
+**Modes**
+
+- `OFFDEVICE_MODE=event` (default) — first detection fires
+  `event_phase=start` with a UUIDv4 `event_id`; after `OFFDEVICE_IDLE_S`
+  of no detections, fires `event_phase=end` with `event_duration_secs`.
+  Use this mode if you want Android push notifications — `clawcam-android`
+  filters on `event_phase == "start"` and silently ignores phaseless events.
+- `OFFDEVICE_MODE=continuous` — any frame with detections fires a
+  single-phase webhook (no `event_phase`), throttled by
+  `OFFDEVICE_COOLDOWN_S`. Lighter traffic; web UI sees them, Android does not.
+
+No clip is assembled by the off-device worker — the Pi-side monitor
+already produces the canonical mp4 clip on its own `end` phase when it's
+running. To shift inference fully off the Pi, set
+`CLAWCAM_INFERENCE_DISABLED=1` on the Pi to skip the Pi's YOLO loop
+while keeping the stream push to mediamtx alive. The Pi will then emit
+no webhooks of its own; the off-device worker becomes the canonical
+event source for that camera.
+
+**Known limitations** (not specific to off-device — same on Pi):
+
+- The web UI's bbox overlay (`clawcam-app/server/web/src/components/EventDetail.tsx:289–294`)
+  assumes `predictions[*].{left,top,right,bottom}` are in JPEG-pixel
+  coords, but the Pi-side pipeline downsamples for the YOLO branch
+  (default 1/3 scale via `CLAWCAM_YOLO_SCALE`). Boxes render at 1/3
+  scale in the upper-left third of the snapshot. Off-device behaves
+  identically; the fix belongs in a separate PR (either upscale boxes
+  before send, or add explicit `width`/`height` fields to the payload).
+- The Android app does not deserialize `predictions` or `tracks` at all
+  (`clawcam-android/Models.kt:84–94`), so bbox/tracks overlays are
+  unavailable on mobile regardless of source.
+
 ## License
 
 MIT

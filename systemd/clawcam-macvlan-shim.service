@@ -1,0 +1,29 @@
+[Unit]
+Description=Macvlan shim — let the host reach Docker macvlan containers
+# Why: Docker's macvlan driver enforces a Linux kernel restriction that
+# blocks the host from talking to its own macvlan child interfaces.
+# When the offdevice-yolo worker runs as a host process on the same
+# machine as a macvlan-attached mediamtx (and/or clawcam-app receiver),
+# the worker can't reach them without this shim. The unit adds a small
+# macvlan interface on the host with an unused LAN IP and adds /32
+# routes for the target container IPs through it.
+#
+# Config lives in /etc/default/clawcam-macvlan-shim — see
+# systemd/clawcam-macvlan-shim.defaults.example for the variables.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/default/clawcam-macvlan-shim
+# Each step is idempotent so a restart (e.g. after an EnvironmentFile
+# edit + daemon-reload) doesn't fail on a re-created shim.
+ExecStart=/bin/sh -c 'ip link show "$SHIM_IF" >/dev/null 2>&1 || ip link add "$SHIM_IF" link "$PARENT_IF" type macvlan mode bridge'
+ExecStart=/bin/sh -c 'ip addr show dev "$SHIM_IF" | grep -q "$SHIM_ADDR" || ip addr add "$SHIM_ADDR" dev "$SHIM_IF"'
+ExecStart=/bin/sh -c 'ip link set "$SHIM_IF" up'
+ExecStart=/bin/sh -c 'for ip in $TARGET_IPS; do ip route replace "$ip/32" dev "$SHIM_IF"; done'
+ExecStop=/bin/sh -c 'ip link del "$SHIM_IF" 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

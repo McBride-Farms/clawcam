@@ -119,8 +119,23 @@ pub async fn run_monitor(
     );
     info!("inference interval: {} ms", inference_interval.as_millis());
 
-    let mut detector = YoloDetector::load(&model_path)?;
-    info!("YOLO model loaded");
+    // When an off-device YOLO worker is the canonical detector for this
+    // camera, set CLAWCAM_INFERENCE_DISABLED=1 to skip local inference.
+    // The Pi still runs the pipeline and pushes the stream to mediamtx —
+    // only the YOLO call and event manager are bypassed. Lets us shift
+    // the inference budget off the Pi without tearing down
+    // clawcam.service (e.g. for thermal relief).
+    let inference_disabled = std::env::var("CLAWCAM_INFERENCE_DISABLED")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let mut detector = if inference_disabled {
+        info!("CLAWCAM_INFERENCE_DISABLED=1 — local YOLO skipped; off-device worker is canonical");
+        None
+    } else {
+        let d = YoloDetector::load(&model_path)?;
+        info!("YOLO model loaded");
+        Some(d)
+    };
 
     // Optional PTZ auto-tracker (UVC). Disabled unless CLAWCAM_PTZ_TRACK=1.
     let mut ptz_tracker = PtzTracker::from_env();
@@ -331,23 +346,30 @@ pub async fn run_monitor(
             }
         }
 
-        // Run inference
-        let infer_start = std::time::Instant::now();
-        let detections = match detector.detect(&frame.data, frame.width, frame.height) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("inference failed: {e}");
-                continue;
+        // Run inference. With CLAWCAM_INFERENCE_DISABLED, detector is None
+        // and we feed an empty detection list downstream — the event manager
+        // never enters Active and no webhooks fire from this Pi.
+        let detections = if let Some(d) = detector.as_mut() {
+            let infer_start = std::time::Instant::now();
+            let res = d.detect(&frame.data, frame.width, frame.height);
+            infer_ms_sum += infer_start.elapsed().as_millis();
+            infer_count += 1;
+            if infer_count >= INFER_LOG_EVERY {
+                let avg = infer_ms_sum as f64 / infer_count as f64;
+                info!("inference: avg {:.1} ms over last {} frames", avg, infer_count);
+                infer_ms_sum = 0;
+                infer_count = 0;
             }
+            match res {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("inference failed: {e}");
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
         };
-        infer_ms_sum += infer_start.elapsed().as_millis();
-        infer_count += 1;
-        if infer_count >= INFER_LOG_EVERY {
-            let avg = infer_ms_sum as f64 / infer_count as f64;
-            info!("inference: avg {:.1} ms over last {} frames", avg, infer_count);
-            infer_ms_sum = 0;
-            infer_count = 0;
-        }
 
         // While recording, stash a bbox sample indexed to the clip frame just pushed.
         // Clip is assembled at a fixed 10 FPS (see `assemble_clip`), so playback

@@ -40,12 +40,18 @@ impl YoloDetector {
             .unwrap_or(DEFAULT_CONF_THRESHOLD)
             .clamp(0.1, 1.0);
 
-        let class_allow = std::env::var("CLAWCAM_CLASSES").ok().map(|s| {
-            s.split(',')
-                .map(|x| x.trim().to_lowercase())
-                .filter(|x| !x.is_empty())
-                .collect::<std::collections::HashSet<_>>()
-        });
+        // Treat empty string (`CLAWCAM_CLASSES=`) the same as unset so deployers
+        // can blank out the line in their EnvironmentFile to mean "all classes"
+        // instead of having the empty allowlist filter every detection out.
+        let class_allow = std::env::var("CLAWCAM_CLASSES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_lowercase())
+                    .filter(|x| !x.is_empty())
+                    .collect::<std::collections::HashSet<_>>()
+            });
 
         // YOLO inference scales quadratically with input size. 640 is stock YOLOv8
         // training size; 416/320 trade accuracy for a big speedup on Pi CPU.
