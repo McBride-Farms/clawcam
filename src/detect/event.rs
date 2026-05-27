@@ -84,20 +84,17 @@ impl EventManager {
         let now = Instant::now();
         let has_objects = !tracks.is_empty();
 
-        match &mut self.state {
-            State::Idle => {
-                if has_objects {
-                    self.state = State::Active {
-                        started: now,
-                        sent_initial: false,
-                        sent_prolonged: false,
-                    };
-                    // Fall through to Active handling below
-                } else {
-                    return EventDecision::Quiet;
-                }
+        if let State::Idle = &mut self.state {
+            if has_objects {
+                self.state = State::Active {
+                    started: now,
+                    sent_initial: false,
+                    sent_prolonged: false,
+                };
+                // Fall through to Active handling below
+            } else {
+                return EventDecision::Quiet;
             }
-            _ => {}
         }
 
         match &mut self.state {

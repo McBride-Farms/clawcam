@@ -230,13 +230,10 @@ Set these in `/etc/clawcam.env` to make the camera follow the most persistent de
 | `CLAWCAM_PTZ_TRACK` | `1` to enable auto-tracking | *(disabled)* |
 | `CLAWCAM_PTZ_HTTP` | VISCA server endpoint the tracker POSTs to | `http://127.0.0.1:8091/ptz` |
 | `CLAWCAM_PTZ_TOKEN` | Bearer token, if the VISCA server requires one | *(optional)* |
-| `CLAWCAM_PTZ_DEADZONE_PCT` | % of half-frame where camera won't move | `10` |
-| `CLAWCAM_PTZ_GAIN` | Scales burst duration with offset magnitude | `1.0` |
-| `CLAWCAM_PTZ_MIN_DURATION_MS` | Shortest motion burst issued when outside the deadzone | `120` |
-| `CLAWCAM_PTZ_MAX_DURATION_MS` | Longest motion burst (when target is near the frame edge) | `700` |
-| `CLAWCAM_PTZ_PAN_INVERT` | `1` to flip pan direction (e.g. upside-down mount) | *(no)* |
-| `CLAWCAM_PTZ_TILT_INVERT` | `1` to flip tilt direction | *(no)* |
-| `CLAWCAM_PTZ_RECENTER_SEC` | Seconds of no tracks before issuing a home() (0/unset = never) | *(disabled)* |
+| `CLAWCAM_PTZ_DEADZONE_PCT` | % of half-frame where camera won't move | `15` |
+| `CLAWCAM_PTZ_TRACK_PAN_INVERT` | `1` to flip pan direction (e.g. upside-down mount) | *(no)* |
+| `CLAWCAM_PTZ_TRACK_TILT_INVERT` | `1` to flip tilt direction | *(no)* |
+| `CLAWCAM_PTZ_RECENTER_SEC` | Seconds of no tracks before the tracker stops (0/unset = never) | *(disabled)* |
 
 ## Troubleshooting
 
@@ -246,5 +243,5 @@ Set these in `/etc/clawcam.env` to make the camera follow the most persistent de
 - **Low detection accuracy:** Try a larger YOLO model (yolov8s.onnx) at the cost of inference speed.
 - **Slow inference:** Out of the box YOLOv8n runs around 3–5 FPS on Pi 4 CPU. To go faster, drop `CLAWCAM_YOLO_INPUT_SIZE` (try 416 or 320 — roughly quadratic speedup) and/or lower `CLAWCAM_INFERENCE_INTERVAL_MS`. Check actual inference latency in the journal: the monitor logs `inference: avg N.N ms over last 40 frames` periodically.
 - **PTZ commands fail with "permission denied":** The SSH user needs access to the v4l2 device. On Debian/Raspberry Pi OS, add the user to the `video` group: `sudo usermod -aG video <user>` then re-login.
-- **PTZ moves in the wrong direction:** UVC sign conventions vary by camera. Flip with `CLAWCAM_PTZ_PAN_INVERT=1` and/or `CLAWCAM_PTZ_TILT_INVERT=1` in `/etc/clawcam.env` for auto-tracking. For manual `clawcam ptz ... nudge`, pass the opposite sign.
+- **PTZ moves in the wrong direction:** UVC sign conventions vary by camera. Flip with `CLAWCAM_PTZ_TRACK_PAN_INVERT=1` and/or `CLAWCAM_PTZ_TRACK_TILT_INVERT=1` in `/etc/clawcam.env` for auto-tracking. For manual `clawcam ptz ... nudge`, pass the opposite sign.
 - **Empty predictions:** If `predictions` is empty, nothing exceeded the 0.4 confidence threshold in the frame.

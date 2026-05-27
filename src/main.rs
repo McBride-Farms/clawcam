@@ -7,6 +7,8 @@ mod ptz;
 mod update;
 mod webhook;
 
+const REPO: &str = "grunt3714-lgtm/clawcam";
+
 use clap::Parser;
 use cmd::Cli;
 

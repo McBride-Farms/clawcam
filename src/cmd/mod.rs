@@ -305,7 +305,7 @@ async fn run_device(action: DeviceAction) -> Result<()> {
             if devices.is_empty() {
                 println!("no devices registered");
             } else {
-                println!("{:<16} {:<20} {:<6} {}", "NAME", "HOST", "PORT", "USER");
+                println!("{:<16} {:<20} {:<6} USER", "NAME", "HOST", "PORT");
                 for d in devices {
                     println!("{:<16} {:<20} {:<6} {}", d.name, d.host, d.port, d.user);
                 }

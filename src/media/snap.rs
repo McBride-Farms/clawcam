@@ -9,22 +9,17 @@ use crate::media::detect_source;
 
 /// Resolve the path where the monitor writes its latest frame.
 fn latest_frame_path() -> String {
-    let candidates = [
-        std::path::PathBuf::from("/run/clawcam/clawcam_latest.jpg"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return c.to_string_lossy().to_string();
-        }
+    if std::path::Path::new("/run/clawcam/clawcam_latest.jpg").exists() {
+        return "/run/clawcam/clawcam_latest.jpg".into();
     }
     if let Some(rt) = dirs::runtime_dir() {
         let p = rt.join("clawcam/clawcam_latest.jpg");
         if p.exists() {
-            return p.to_string_lossy().to_string();
+            return p.to_string_lossy().into_owned();
         }
     }
     // Legacy fallback
-    "/tmp/clawcam_latest.jpg".to_string()
+    "/tmp/clawcam_latest.jpg".into()
 }
 
 /// Remote snap: SSHes into the device and runs `clawcam _snap` there.

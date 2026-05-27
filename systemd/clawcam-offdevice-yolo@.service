@@ -1,6 +1,6 @@
 [Unit]
 Description=clawcam off-device YOLO worker for camera %i
-Documentation=https://github.com/McBride-Farms/clawcam
+Documentation=https://github.com/grunt3714-lgtm/clawcam
 After=network-online.target
 Wants=network-online.target
 

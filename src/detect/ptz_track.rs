@@ -75,7 +75,6 @@ impl Default for Observation {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Home reserved for future re-center-on-idle wiring
 enum Command {
     /// VISCA drive burst with per-axis direction (-1/0/+1) and VISCA speed bytes.
     Burst {
@@ -86,7 +85,6 @@ enum Command {
         duration_ms: u64,
     },
     Stop,
-    Home,
 }
 
 struct SteeringConfig {
@@ -257,11 +255,10 @@ impl PtzTracker {
     }
 
     fn select_target<'a>(&self, tracks: &'a [TrackedObject]) -> Option<&'a TrackedObject> {
-        if let Some(id) = self.locked_track_id {
-            if let Some(t) = tracks.iter().find(|t| t.track_id == id) {
+        if let Some(id) = self.locked_track_id
+            && let Some(t) = tracks.iter().find(|t| t.track_id == id) {
                 return Some(t);
             }
-        }
         tracks.iter().max_by_key(|t| t.duration().as_millis())
     }
 
@@ -458,7 +455,6 @@ async fn command_worker(endpoint: String, token: Option<String>, mut rx: mpsc::R
                 "tilt_speed": tilt_speed,
             }),
             Command::Stop => serde_json::json!({ "stop": true }),
-            Command::Home => serde_json::json!({ "home": true }),
         };
 
         let mut req = client.post(&endpoint).json(&body);

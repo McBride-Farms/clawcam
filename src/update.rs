@@ -18,8 +18,7 @@ use tempfile::NamedTempFile;
 
 use crate::device::{Device, DeviceRegistry};
 use crate::ssh::session;
-
-const REPO: &str = "grunt3714-lgtm/clawcam";
+use crate::REPO;
 
 /// Replace the currently-running clawcam binary with the latest (or pinned) release.
 pub async fn update_local(version: Option<&str>) -> Result<()> {

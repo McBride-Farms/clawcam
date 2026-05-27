@@ -259,7 +259,7 @@ graph TD
 5. **Event manager** decides what to report based on the state machine:
    - **Initial alert** — first detection, includes 3 pre-detection frames
    - **Tracking update** — objects persist >3s or new arrival (rate-limited to 10s)
-   - **Final report** — all objects gone for 3s, assembles MP4 clip from buffered frames via ffmpeg
+   - **Final report** — all objects gone for 3s, assembles MP4 clip from buffered frames via GStreamer
 6. Stationary objects already reported are suppressed to avoid spam
 
 ### Supported cameras
@@ -292,7 +292,7 @@ Full 80-class COCO set. Most relevant for monitoring:
 | **Frame buffer** | 3s rolling JPEG ring buffer for pre/post-detection context |
 | **Object tracker** | IoU-based frame-to-frame matching, track IDs, movement |
 | **Event manager** | State machine: Idle → Active → Cooldown → Complete |
-| **ffmpeg** | Assembles buffered JPEG frames into MP4 clips |
+| **GStreamer** | Assembles buffered JPEG frames into MP4 clips |
 | **systemd** | Service management, boot persistence, auto-restart |
 
 ### File layout on device

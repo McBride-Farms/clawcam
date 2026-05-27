@@ -4,11 +4,11 @@ use tracing::info;
 
 use crate::device::Device;
 use crate::ssh::session;
+use crate::REPO;
 
 const REMOTE_BIN: &str = "/usr/local/bin/clawcam";
 const REMOTE_MODEL: &str = "/usr/local/share/clawcam/yolov8n.onnx";
 const SERVICE_NAME: &str = "clawcam";
-const GITHUB_REPO: &str = "grunt3714-lgtm/clawcam";
 
 pub async fn run_setup(
     dev: &Device,
@@ -17,8 +17,6 @@ pub async fn run_setup(
     webhook_tokens: &[String],
     keep_model: bool,
 ) -> Result<()> {
-    // Validate pairing up front; the same rules the monitor will apply.
-    crate::webhook::parse_targets(webhooks, webhook_tokens)?;
     info!("setting up {} ({})", dev.name, dev.host);
 
     // 1. Install system dependencies (runtime only — no -dev packages needed on device)
@@ -27,7 +25,7 @@ pub async fn run_setup(
         sudo apt-get update -qq && sudo apt-get install -y -qq \
          gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
          gstreamer1.0-plugins-bad gstreamer1.0-libav \
-         v4l-utils libv4l-0 ffmpeg"
+         v4l-utils libv4l-0"
     ).await.context("failed to install dependencies")?;
 
     // 2. Detect camera source
@@ -234,21 +232,19 @@ async fn detect_camera_source(dev: &Device) -> Result<String> {
     let gst_check = session::run_cmd(dev,
         "gst-inspect-1.0 libcamerasrc >/dev/null 2>&1 && echo 'libcamerasrc'"
     ).await;
-    if let Ok(output) = &gst_check {
-        if output.trim() == "libcamerasrc" {
+    if let Ok(output) = &gst_check
+        && output.trim() == "libcamerasrc" {
             return Ok("libcamerasrc".to_string());
         }
-    }
 
     // Check for V4L2 devices (USB webcams, conference cams)
     let v4l2 = session::run_cmd(dev,
         "gst-inspect-1.0 v4l2src >/dev/null 2>&1 && ls /dev/video0 2>/dev/null && echo 'v4l2src'"
     ).await;
-    if let Ok(output) = &v4l2 {
-        if output.contains("v4l2src") {
+    if let Ok(output) = &v4l2
+        && output.contains("v4l2src") {
             return Ok("v4l2src".to_string());
         }
-    }
 
     anyhow::bail!("no camera detected — ensure GStreamer and camera drivers are installed")
 }
@@ -318,7 +314,7 @@ async fn download_model_to_device(dev: &Device) -> Result<()> {
 /// Get the download URL for a release asset from the latest GitHub release.
 async fn get_release_asset_url(asset_name: &str) -> Result<String> {
     let api_url = format!(
-        "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        "https://api.github.com/repos/{REPO}/releases/latest"
     );
 
     let client = reqwest::Client::new();
@@ -336,7 +332,7 @@ async fn get_release_asset_url(asset_name: &str) -> Result<String> {
 
     // Direct download URL pattern for GitHub releases
     let url = format!(
-        "https://github.com/{GITHUB_REPO}/releases/download/{tag}/{asset_name}"
+        "https://github.com/{REPO}/releases/download/{tag}/{asset_name}"
     );
 
     info!("release asset: {url}");

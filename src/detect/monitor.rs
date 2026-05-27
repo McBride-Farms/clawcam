@@ -335,11 +335,7 @@ pub async fn run_monitor(
 
         // If we're in an active event, stash frames for clip assembly
         if event_mgr.is_recording() {
-            clip_frames.push(TimestampedFrame {
-                jpeg: jpeg.clone(),
-                captured_at: std::time::Instant::now(),
-                epoch: chrono::Utc::now().timestamp(),
-            });
+            clip_frames.push(TimestampedFrame { jpeg: jpeg.clone() });
             // Hard cap to bound memory (~15 MB at 50KB/frame)
             if clip_frames.len() > MAX_CLIP_FRAMES {
                 clip_frames.drain(..clip_frames.len() - MAX_CLIP_FRAMES);

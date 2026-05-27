@@ -1,20 +1,8 @@
 use std::collections::VecDeque;
-use std::time::Instant;
 
+#[derive(Clone)]
 pub struct TimestampedFrame {
     pub jpeg: Vec<u8>,
-    pub captured_at: Instant,
-    pub epoch: i64,
-}
-
-impl Clone for TimestampedFrame {
-    fn clone(&self) -> Self {
-        Self {
-            jpeg: self.jpeg.clone(),
-            captured_at: self.captured_at,
-            epoch: self.epoch,
-        }
-    }
 }
 
 /// Fixed-size ring buffer of timestamped JPEG frames.
@@ -36,11 +24,7 @@ impl FrameBuffer {
         if self.buffer.len() >= self.capacity {
             self.buffer.pop_front();
         }
-        self.buffer.push_back(TimestampedFrame {
-            jpeg,
-            captured_at: Instant::now(),
-            epoch: chrono::Utc::now().timestamp(),
-        });
+        self.buffer.push_back(TimestampedFrame { jpeg });
     }
 
     /// Get the last `n` frames (pre-detection context).

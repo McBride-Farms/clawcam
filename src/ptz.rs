@@ -196,11 +196,10 @@ async fn handle(
 fn content_length(headers: &str) -> usize {
     for line in headers.lines() {
         let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            if let Ok(n) = v.trim().parse::<usize>() {
+        if let Some(v) = lower.strip_prefix("content-length:")
+            && let Ok(n) = v.trim().parse::<usize>() {
                 return n;
             }
-        }
     }
     0
 }

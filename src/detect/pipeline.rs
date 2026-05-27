@@ -110,14 +110,13 @@ pub fn create_pipeline(
     let rgb_scale = gst::ElementFactory::make("videoscale").build()?;
     let rgb_convert = gst::ElementFactory::make("videoconvert").build()?;
 
-    let (post_w, post_h) = (width, height);
     let yolo_scale_factor: u32 = std::env::var("CLAWCAM_YOLO_SCALE")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3)
         .max(1);
-    let yolo_w = (post_w / yolo_scale_factor).max(160);
-    let yolo_h = (post_h / yolo_scale_factor).max(90);
+    let yolo_w = (width / yolo_scale_factor).max(160);
+    let yolo_h = (height / yolo_scale_factor).max(90);
     tracing::info!("YOLO branch: {yolo_w}x{yolo_h} (1/{yolo_scale_factor} scale)");
 
     let rgb_caps = gst::ElementFactory::make("capsfilter")
@@ -143,9 +142,6 @@ pub fn create_pipeline(
     ])?;
     if let (Some(c), Some(d), Some(v)) = (&src_caps, &jpegdec, &src_convert) {
         pipeline.add_many([c, d, v])?;
-    }
-
-    if let (Some(c), Some(d), Some(v)) = (&src_caps, &jpegdec, &src_convert) {
         gst::Element::link_many([&source, c, d, v, &caps, &tee])?;
     } else {
         gst::Element::link_many([&source, &caps, &tee])?;
@@ -239,62 +235,6 @@ fn build_stream_branch(pipeline: &gst::Pipeline, tee: &gst::Element, url: &str) 
     gst::Element::link_many([&queue, &encoder, &enc_caps, &parse, &rtsp_sink])?;
     tee.link_pads(None, &queue, None)?;
     Ok(())
-}
-
-#[allow(dead_code)]
-fn make_encoder() -> Result<(gst::Element, Option<gst::Element>)> {
-    // Allow override; default to x264 because Pi V4L2 encoder is fragile
-    // (needs gpu_mem bump + driver tweaks) and we value reliability.
-    let prefer_hw = std::env::var("CLAWCAM_STREAM_HW")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-
-    if prefer_hw {
-        if let Ok(enc) = gst::ElementFactory::make("v4l2h264enc").build() {
-            let caps = gst::ElementFactory::make("capsfilter")
-                .property(
-                    "caps",
-                    gst::Caps::builder("video/x-raw")
-                        .field("format", "NV12")
-                        .build(),
-                )
-                .build()?;
-            return Ok((enc, Some(caps)));
-        }
-    }
-
-    if let Ok(enc) = gst::ElementFactory::make("x264enc")
-        .property_from_str("tune", "zerolatency")
-        .property_from_str("speed-preset", "ultrafast")
-        .property("bitrate", 3000u32)
-        .property("key-int-max", 30u32)
-        .property("bframes", 0u32)
-        .build()
-    {
-        let caps = gst::ElementFactory::make("capsfilter")
-            .property(
-                "caps",
-                gst::Caps::builder("video/x-raw")
-                    .field("format", "I420")
-                    .build(),
-            )
-            .build()?;
-        return Ok((enc, Some(caps)));
-    }
-
-    if let Ok(enc) = gst::ElementFactory::make("v4l2h264enc").build() {
-        let caps = gst::ElementFactory::make("capsfilter")
-            .property(
-                "caps",
-                gst::Caps::builder("video/x-raw")
-                    .field("format", "NV12")
-                    .build(),
-            )
-            .build()?;
-        return Ok((enc, Some(caps)));
-    }
-
-    anyhow::bail!("no H.264 encoder available (need x264enc or v4l2h264enc)")
 }
 
 /// Grab a single JPEG from the pipeline's jpeg_sink.
